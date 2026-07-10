@@ -1,0 +1,15 @@
+{
+  "name": "Carnet — notes & croquis",
+  "short_name": "Carnet",
+  "description": "Carnet de notes et croquis, avec stylet, pour préparer la crèche.",
+  "start_url": "./carnet.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#2a2a2a",
+  "theme_color": "#2a2a2a",
+  "icons": [
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png" }
+  ]
+}
