@@ -657,9 +657,9 @@
 <script>
 /* ============ CONSTANTS ============ */
 const PAGE_W = 794, PAGE_H = 1123; // A4 @ 96dpi, portrait
-const COLORS = ['#000000','#e8491d','#16a34a','#2563eb','#dc2626','#9333ea','#f5a623','#0891b2'];
+const COLORS = ['#000000','#dc2626','#16a34a','#2563eb','#e8491d','#9333ea','#f5a623','#0891b2'];
 const HIGHLIGHT_COLORS = ['#fff176','#a5d6a7','#f48fb1','#90caf9','#ffb74d'];
-const WIDTHS = [2,4,7];
+const WIDTHS = [1,2,4,7]; // 1 = nouveau point plus petit, ajouté en plus des tailles existantes
 const FONT_SIZES = [13,16,20,26,34];
 const FONTS = [
   { key:'sans',  css:"'Inter', system-ui, sans-serif",        label:'Sans' },
@@ -718,7 +718,7 @@ function saveLastPosition(){
 
 let tool = 'select';
 let penColor = COLORS[0];
-let penWidth = WIDTHS[0];
+let penWidth = 2; // valeur par défaut inchangée (avant l'ajout du point plus petit, WIDTHS[0] valait déjà 2)
 let eraserMode = 'area'; // 'area' (défaut) = gomme carrée qui découpe les traits, ne supprime que ce qu'elle touche · 'stroke' = supprime le trait entier touché
 let shapeMode = 'free'; // 'free' = dessin libre · 'line'/'arrow'/'rect'/'circle'/'ellipse'/'cloud' = forme tracée par glisser
 let selectionShapeMode = 'rect'; // 'rect' = zone rectangulaire (défaut) · 'lasso' = contour libre à main levée
@@ -5479,6 +5479,10 @@ if('serviceWorker' in navigator){
     channel.port1.onmessage = (e)=>{
       clearTimeout(timeout);
       if(e.data && e.data.ok){
+        // location.reload() vide immédiatement la page (plus de DOM, plus de "data" en mémoire) :
+        // impossible d'afficher un message de confirmation AVANT de recharger. On pose donc un
+        // petit repère dans localStorage, lu et affiché juste après le rechargement (voir plus bas).
+        try{ localStorage.setItem('carnet_update_success_flag', '1'); }catch(err){}
         location.reload();
       } else {
         btn.disabled = false;
@@ -5488,6 +5492,20 @@ if('serviceWorker' in navigator){
     };
     navigator.serviceWorker.controller.postMessage('FORCE_UPDATE', [channel.port2]);
   };
+})();
+
+// Confirmation visible juste après un rechargement déclenché par le bouton "🔄" ci-dessus (voir
+// le repère posé avant location.reload()) — sans ça, une mise à jour réussie ne se voyait qu'au
+// fait que la page clignote, sans aucune confirmation explicite.
+(function(){
+  let justUpdated = false;
+  try{
+    if(localStorage.getItem('carnet_update_success_flag')){
+      localStorage.removeItem('carnet_update_success_flag');
+      justUpdated = true;
+    }
+  }catch(err){}
+  if(justUpdated) showInfoMessage('✓ Mise à jour réussie — tu as la dernière version.');
 })();
 </script>
 </body>
