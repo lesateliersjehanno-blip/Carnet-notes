@@ -65,6 +65,14 @@
     text-transform:none;
   }
   #brand #classeur-select:hover{border-color:var(--accent);}
+  /* Les icones (+, crayon, archive, supprimer) restent cachees tant que la souris n'est pas sur la
+     barre : ca laisse plus de place au nom du classeur. Sur souris, un survol de #brand les revele
+     (media hover:hover evite que le tactile ne declenche un survol collant, meme correctif que pour
+     .section-actions plus haut). Sur tactile, un appui long sur la barre (setupLongPressReveal, JS,
+     meme mecanisme que pour les sections/pages) ajoute .show-actions pour les reveler explicitement. */
+  #brand .icon-btn{opacity:0;pointer-events:none;max-width:0;padding:0;margin:0;overflow:hidden;transition:opacity .1s, max-width .1s;}
+  @media (hover:hover){ #brand:hover .icon-btn{opacity:1;pointer-events:auto;max-width:26px;padding:0;margin:0;} }
+  #brand.show-actions .icon-btn{opacity:1;pointer-events:auto;max-width:26px;padding:0;margin:0;}
   #classeur-bar{
     display:flex;align-items:center;gap:4px;padding:8px 8px 4px 8px;
   }
@@ -1017,30 +1025,58 @@ function renderClasseurBar(){
     const isArchived = !!(current && current.archived);
     archiveBtn.textContent = isArchived ? '📤' : '📦';
     archiveBtn.title = isArchived
-      ? 'Désarchiver ce classeur (sera de nouveau envoyé au cloud au prochain "⬆ Envoyer")'
-      : 'Archiver ce classeur (ne sera plus envoyé au cloud, libère de la place)';
+      ? 'Restaurer ce classeur (sera de nouveau envoyé au cloud au prochain "⬆ Envoyer")'
+      : 'Archiver ou supprimer ce classeur...';
   }
 }
 
 // Bascule l'archivage du classeur actif — voir le commentaire dans migrate() pour ce que ça
 // change concrètement. Purement local et instantané (aucun appel réseau ici) : c'est le prochain
 // "⬆ Envoyer" qui, en pratique, retirera ce classeur du cloud (ou l'y renverra si désarchivé).
-function toggleArchiveClasseur(){
+// Bouton archive (📦/📤 dans #brand) : ouvre un choix plutot que d'appliquer un seul
+// comportement fixe -- l'utilisateur doit pouvoir archiver UN classeur (pas forcement tous) et,
+// depuis ce meme bouton, soit le conserver localement (reversible), soit le supprimer pour de bon
+// (cloud + local, irreversible). Le menu s'adapte a l'etat actuel : pas encore archive -> choix
+// entre "archiver et supprimer" / "archiver et conserver" ; deja archive -> juste "restaurer".
+function openArchiveMenu(){
   const c = activeClasseur();
   if(!c) return;
-  if(!c.archived){
-    showConfirmMessage(`Archiver le classeur "${c.name}" ? Il reste consultable et modifiable ICI, mais ne sera plus envoyé au cloud — sa copie en ligne actuelle (s'il y en a une) sera supprimée au prochain "⬆ Envoyer", ce qui libère de la place. Tu pourras le désarchiver plus tard pour le resynchroniser.`, ()=>{
-      c.archived = true;
+  if(c.archived){
+    showConfirmMessage(`Restaurer le classeur "${c.name}" ? Il sera de nouveau envoyé au cloud au prochain "⬆ Envoyer".`, ()=>{
+      c.archived = false;
       save(); renderSidebar();
-      showInfoMessage(`📦 "${c.name}" est archivé. Fais "⬆ Envoyer" pour supprimer sa copie en ligne et libérer la place.`);
+      showInfoMessage(`"${c.name}" n'est plus archivé — il sera de nouveau envoyé au cloud au prochain "⬆ Envoyer".`);
     });
-  } else {
-    c.archived = false;
-    save(); renderSidebar();
-    showInfoMessage(`"${c.name}" n'est plus archivé — il sera de nouveau envoyé au cloud au prochain "⬆ Envoyer".`);
+    return;
   }
+  showActionMenu(`Classeur "${c.name}" :`, [
+    {
+      label: 'Archiver et conserver',
+      onPick: ()=>{
+        showConfirmMessage(`Archiver le classeur "${c.name}" ? Il reste consultable et modifiable ICI, mais ne sera plus envoyé au cloud — sa copie en ligne actuelle (s'il y en a une) sera supprimée au prochain "⬆ Envoyer", ce qui libère de la place. Tu pourras le restaurer plus tard pour le resynchroniser.`, ()=>{
+          c.archived = true;
+          save(); renderSidebar();
+          showInfoMessage(`📦 "${c.name}" est archivé. Fais "⬆ Envoyer" pour supprimer sa copie en ligne et libérer la place.`);
+        });
+      }
+    },
+    {
+      label: 'Archiver et supprimer',
+      onPick: ()=>{
+        if(data.classeurs.length<=1){ showInfoMessage('Il faut garder au moins un classeur.'); return; }
+        // Double confirmation car cette option est irreversible et definitive (cloud + local),
+        // contrairement a "archiver et conserver" -- demande explicite de l'utilisateur.
+        showConfirmMessage(`⚠️ Supprimer DÉFINITIVEMENT le classeur "${c.name}" et tout son contenu, partout (cet appareil ET le cloud) ? Cette action est irréversible.`, ()=>{
+          showConfirmMessage(`Dernière confirmation : "${c.name}" et tout son contenu seront perdus pour toujours. Continuer ?`, ()=>{
+            performDeleteClasseur(c);
+            showInfoMessage(`"${c.name}" a été supprimé définitivement.`);
+          });
+        });
+      }
+    }
+  ]);
 }
-document.getElementById('archive-classeur-btn').onclick = toggleArchiveClasseur;
+document.getElementById('archive-classeur-btn').onclick = openArchiveMenu;
 
 function renderSidebar(){
   renderClasseurBar();
@@ -1190,9 +1226,12 @@ function setupLongPressReveal(el){
 // Un appui ailleurs (sur une autre section/page, ou n'importe où hors du menu d'actions révélé)
 // referme les icônes actuellement visibles.
 document.addEventListener('pointerdown', (e)=>{
-  if(e.target.closest('.section-head, .page-item')) return;
+  if(e.target.closest('.section-head, .page-item, #brand')) return;
   document.querySelectorAll('.show-actions').forEach(x=> x.classList.remove('show-actions'));
 }, true);
+// La barre des classeurs (#brand) est statique (jamais reconstruite comme les sections/pages) :
+// on branche donc l'appui long une seule fois ici, plutot qu'a chaque rendu.
+setupLongPressReveal(document.getElementById('brand'));
 
 function addSection(){
   const classeur = activeClasseur();
@@ -1242,11 +1281,11 @@ function renameClasseur(){
 }
 document.getElementById('rename-classeur-btn').onclick = renameClasseur;
 
-function deleteClasseur(){
-  if(data.classeurs.length<=1){ alert('Il faut garder au moins un classeur.'); return; }
-  const c = activeClasseur();
-  if(!c) return;
-  if(!confirm(`Supprimer le classeur "${c.name}" et tout son contenu ?`)) return;
+// Suppression definitive effective (retrait local + tombstone pour que le prochain "Envoyer"
+// supprime aussi la copie cloud) -- partagee entre le bouton ✕ (confirmation simple, directe)
+// et le menu d'archivage / "Archiver et supprimer" (voir openArchiveMenu, double confirmation car
+// atteint via un chemin ou l'option non-destructive "archiver et conserver" est juste a cote).
+function performDeleteClasseur(c){
   recordTombstone('classeur', c.id);
   data.classeurs = data.classeurs.filter(x=>x.id!==c.id);
   activeClasseurId = data.classeurs[0].id;
@@ -1254,6 +1293,13 @@ function deleteClasseur(){
   activePageId = data.classeurs[0].sections[0]?.pages[0]?.id || null;
   activeSheetId = data.classeurs[0].sections[0]?.pages[0]?.sheets[0]?.id || null;
   save(); renderSidebar(); renderCanvasStack();
+}
+function deleteClasseur(){
+  if(data.classeurs.length<=1){ alert('Il faut garder au moins un classeur.'); return; }
+  const c = activeClasseur();
+  if(!c) return;
+  if(!confirm(`Supprimer le classeur "${c.name}" et tout son contenu ?`)) return;
+  performDeleteClasseur(c);
 }
 document.getElementById('delete-classeur-btn').onclick = deleteClasseur;
 
