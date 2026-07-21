@@ -588,6 +588,7 @@
         <button id="compact-images-btn" title="Recompresser les photos déjà présentes dans ce carnet pour libérer de la place (utile si le stockage local est plein)">🗜 Compacter</button>
       </div>
       <input type="file" id="import-input" accept="application/json" style="display:none" onchange="importData(event)">
+      <input type="file" id="restore-classeur-input" accept="application/json" style="display:none" onchange="restoreClasseurFileChange(event)">
     </div>
   </div>
 
@@ -1021,57 +1022,154 @@ function renderClasseurBar(){
   document.getElementById('delete-classeur-btn').disabled = data.classeurs.length<=1;
   const archiveBtn = document.getElementById('archive-classeur-btn');
   if(archiveBtn){
-    const current = activeClasseur();
-    const isArchived = !!(current && current.archived);
-    archiveBtn.textContent = isArchived ? '📤' : '📦';
-    archiveBtn.title = isArchived
-      ? 'Restaurer ce classeur (sera de nouveau envoyé au cloud au prochain "⬆ Envoyer")'
-      : 'Archiver ou supprimer ce classeur...';
+    // Le menu ouvert par ce bouton (voir openArchiveMenu) propose toujours les 3 mêmes choix, quel
+    // que soit l'état du classeur — l'icône/titre n'ont donc plus besoin de changer selon isArchived.
+    archiveBtn.textContent = '📦';
+    archiveBtn.title = 'Archiver, exporter, restaurer ou supprimer un classeur...';
   }
 }
 
-// Bascule l'archivage du classeur actif — voir le commentaire dans migrate() pour ce que ça
-// change concrètement. Purement local et instantané (aucun appel réseau ici) : c'est le prochain
-// "⬆ Envoyer" qui, en pratique, retirera ce classeur du cloud (ou l'y renverra si désarchivé).
-// Bouton archive (📦/📤 dans #brand) : ouvre un choix plutot que d'appliquer un seul
-// comportement fixe -- l'utilisateur doit pouvoir archiver UN classeur (pas forcement tous) et,
-// depuis ce meme bouton, soit le conserver localement (reversible), soit le supprimer pour de bon
-// (cloud + local, irreversible). Le menu s'adapte a l'etat actuel : pas encore archive -> choix
-// entre "archiver et supprimer" / "archiver et conserver" ; deja archive -> juste "restaurer".
+// Nom de fichier lisible pour l'export d'un classeur : lettres/chiffres seulement, le reste
+// devient un tiret, pour rester valide comme nom de fichier sur tous les systemes (Windows compris).
+function slugifyForFilename(name){
+  return (name || 'classeur').toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // enleve les accents
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'classeur';
+}
+
+// Enregistre un classeur dans un fichier JSON choisi par la personne (vraie fenetre "Enregistrer
+// sous" si le navigateur la supporte -- Chrome/Edge -- sinon simple telechargement classique, meme
+// repli que insertImageFromPicker/manualExport plus haut dans ce fichier). Retourne true si le
+// fichier a bien ete ecrit, false si annule ou en echec (dans ce cas l'appelant NE DOIT PAS
+// continuer -- ex: ne pas supprimer le classeur si son export a echoue ou ete annule).
+// showSaveFilePicker() DOIT rester le tout premier appel asynchrone de cette fonction, sans aucun
+// await avant -- meme raison que documentee ailleurs dans ce fichier (insertImageFromPicker,
+// manualExport...) : le geste utilisateur qui autorise l'ouverture du selecteur doit etre "frais".
+async function exportClasseurToFile(c){
+  const fileName = `classeur-${slugifyForFilename(c.name)}-${new Date().toISOString().slice(0,10)}.json`;
+  if('showSaveFilePicker' in window){
+    try{
+      const fileHandle = await window.showSaveFilePicker({
+        suggestedName: fileName,
+        types: [{ description: 'Classeur (JSON)', accept: {'application/json': ['.json']} }]
+      });
+      const writable = await fileHandle.createWritable();
+      await writable.write(JSON.stringify(c, null, 2));
+      await writable.close();
+      return true;
+    }catch(err){
+      if(err && err.name==='AbortError') return false; // annule par la personne
+      console.error('Export du classeur impossible :', err);
+      showInfoMessage("L'enregistrement du fichier a échoué — le classeur n'a pas été modifié. Réessaie.");
+      return false;
+    }
+  }
+  // Solution de repli pour les navigateurs sans cette fonction (Firefox, Safari/iPad) :
+  // telechargement classique dans le dossier "Telechargements", sans choix de dossier possible.
+  const blob = new Blob([JSON.stringify(c, null, 2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = fileName;
+  a.click();
+  setTimeout(()=> URL.revokeObjectURL(a.href), 2000);
+  return true;
+}
+
+// Relit un fichier JSON de classeur exporte par exportClasseurToFile ci-dessus, et le rajoute dans
+// le carnet comme un classeur NORMAL (actif, non archive) -- utilise a la fois pour ramener un
+// classeur qui avait ete supprime apres export, et pour simplement dupliquer/rapatrier un export
+// depuis un autre appareil. Un nouvel identifiant est toujours genere pour eviter toute collision
+// avec un classeur existant (par exemple si le classeur d'origine existe encore dans le carnet).
+function applyRestoredClasseurJson(text, sourceName){
+  let obj;
+  try{
+    obj = JSON.parse(text);
+    if(!obj || !Array.isArray(obj.sections)) throw new Error('ce fichier ne contient pas un classeur valide');
+  }catch(err){
+    showInfoMessage('Fichier invalide' + (sourceName ? ` ("${sourceName}")` : '') + ' : ' + (err && err.message ? err.message : 'format non reconnu') + '.');
+    return;
+  }
+  obj.id = uid();
+  obj.archived = false;
+  if(!obj.name) obj.name = 'Classeur restauré';
+  data.classeurs.push(obj);
+  activeClasseurId = obj.id;
+  activeSectionId = obj.sections[0]?.id || null;
+  activePageId = obj.sections[0]?.pages[0]?.id || null;
+  activeSheetId = obj.sections[0]?.pages[0]?.sheets[0]?.id || null;
+  save(); renderSidebar(); renderCanvasStack();
+  showInfoMessage(`"${obj.name}" a été remis dans le carnet.`);
+}
+// showOpenFilePicker() DOIT rester le tout premier appel asynchrone de cette fonction, sans aucun
+// await avant (meme raison que triggerImport plus haut) -- sinon repli silencieux sur l'input caché.
+async function restoreClasseurFromFile(){
+  if(!('showOpenFilePicker' in window)){
+    document.getElementById('restore-classeur-input').click();
+    return;
+  }
+  try{
+    const [fileHandle] = await window.showOpenFilePicker({
+      types: [{ description: 'Classeur (JSON)', accept: {'application/json': ['.json']} }],
+      multiple: false
+    });
+    const file = await fileHandle.getFile();
+    applyRestoredClasseurJson(await file.text(), fileHandle.name);
+  }catch(err){
+    if(err && err.name==='AbortError') return; // annule par la personne
+    console.warn('Sélecteur de fichier impossible, retour au sélecteur classique.', err);
+    document.getElementById('restore-classeur-input').click();
+  }
+}
+function restoreClasseurFileChange(e){
+  const file = e.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = ()=> applyRestoredClasseurJson(reader.result, file.name);
+  reader.readAsText(file);
+  e.target.value = '';
+}
+
+// Bouton archive (📦 dans #brand) : ouvre toujours les 3 mêmes choix, quel que soit l'état actuel
+// du classeur -- "archiver et supprimer" (export JSON puis suppression définitive, cloud + local),
+// "restaurer depuis un fichier" (réimporte un export precedent comme nouveau classeur actif), et
+// "exporter ce classeur" (fichier JSON portable, SANS rien changer d'autre -- le classeur reste
+// actif et continue d'être envoyé au cloud normalement ; sert à transférer un classeur vers un
+// AUTRE carnet/personne). Demande explicite de l'utilisateur : la restauration passe toujours par
+// un fichier, jamais par un simple bouton "désarchiver" -- donc ce menu ne depend plus de c.archived.
 function openArchiveMenu(){
   const c = activeClasseur();
   if(!c) return;
-  if(c.archived){
-    showConfirmMessage(`Restaurer le classeur "${c.name}" ? Il sera de nouveau envoyé au cloud au prochain "⬆ Envoyer".`, ()=>{
-      c.archived = false;
-      save(); renderSidebar();
-      showInfoMessage(`"${c.name}" n'est plus archivé — il sera de nouveau envoyé au cloud au prochain "⬆ Envoyer".`);
-    });
-    return;
-  }
   showActionMenu(`Classeur "${c.name}" :`, [
-    {
-      label: 'Archiver et conserver',
-      onPick: ()=>{
-        showConfirmMessage(`Archiver le classeur "${c.name}" ? Il reste consultable et modifiable ICI, mais ne sera plus envoyé au cloud — sa copie en ligne actuelle (s'il y en a une) sera supprimée au prochain "⬆ Envoyer", ce qui libère de la place. Tu pourras le restaurer plus tard pour le resynchroniser.`, ()=>{
-          c.archived = true;
-          save(); renderSidebar();
-          showInfoMessage(`📦 "${c.name}" est archivé. Fais "⬆ Envoyer" pour supprimer sa copie en ligne et libérer la place.`);
-        });
-      }
-    },
     {
       label: 'Archiver et supprimer',
       onPick: ()=>{
         if(data.classeurs.length<=1){ showInfoMessage('Il faut garder au moins un classeur.'); return; }
         // Double confirmation car cette option est irreversible et definitive (cloud + local),
         // contrairement a "archiver et conserver" -- demande explicite de l'utilisateur.
-        showConfirmMessage(`⚠️ Supprimer DÉFINITIVEMENT le classeur "${c.name}" et tout son contenu, partout (cet appareil ET le cloud) ? Cette action est irréversible.`, ()=>{
-          showConfirmMessage(`Dernière confirmation : "${c.name}" et tout son contenu seront perdus pour toujours. Continuer ?`, ()=>{
+        showConfirmMessage(`⚠️ Supprimer DÉFINITIVEMENT le classeur "${c.name}" et tout son contenu, partout (cet appareil ET le cloud) ? Un fichier de sauvegarde JSON te sera d'abord demandé.`, ()=>{
+          showConfirmMessage(`Dernière confirmation : après l'enregistrement du fichier, "${c.name}" sera retiré du carnet pour toujours. Continuer ?`, async ()=>{
+            const ok = await exportClasseurToFile(c);
+            if(!ok) return; // annulé ou échoué : on ne supprime rien
             performDeleteClasseur(c);
-            showInfoMessage(`"${c.name}" a été supprimé définitivement.`);
+            showInfoMessage(`"${c.name}" a été exporté puis supprimé définitivement.`);
           });
         });
+      }
+    },
+    {
+      label: 'Restaurer depuis un fichier',
+      onPick: ()=> restoreClasseurFromFile()
+    },
+    {
+      // Ne touche PAS c.archived : le classeur reste un classeur normal, toujours envoyé au cloud
+      // comme avant. Le but ici n'est pas de libérer de la place, mais d'obtenir un fichier JSON
+      // portable du classeur pour pouvoir le transférer/importer dans un AUTRE carnet (autre
+      // personne ou autre appareil) via "Restaurer depuis un fichier" là-bas — demande explicite
+      // de l'utilisateur, qui a précisé vouloir garder la synchro cloud active pour ce classeur.
+      label: 'Exporter ce classeur (JSON)',
+      onPick: async ()=>{
+        const ok = await exportClasseurToFile(c);
+        if(ok) showInfoMessage(`"${c.name}" a été exporté. Le classeur reste inchangé ici et continue d'être envoyé au cloud normalement.`);
       }
     }
   ]);
