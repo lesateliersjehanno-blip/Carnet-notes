@@ -65,13 +65,11 @@
     text-transform:none;
   }
   #brand #classeur-select:hover{border-color:var(--accent);}
-  /* Les icones (+, crayon, archive, supprimer) restent cachees tant que la souris n'est pas sur la
-     barre : ca laisse plus de place au nom du classeur. Sur souris, un survol de #brand les revele
-     (media hover:hover evite que le tactile ne declenche un survol collant, meme correctif que pour
-     .section-actions plus haut). Sur tactile, un appui long sur la barre (setupLongPressReveal, JS,
-     meme mecanisme que pour les sections/pages) ajoute .show-actions pour les reveler explicitement. */
+  /* Les icones (+, crayon, archive, supprimer) restent cachees par defaut : ca laisse plus de place
+     au nom du classeur. Revelees uniquement par un DOUBLE-clic/double-tap sur la barre (voir
+     handlePotentialDoubleClick, JS) -- meme regle que pour les sections/pages, plus de survol ni
+     d'appui long (le stylet declenche ":hover" des qu'il approche l'ecran sans le toucher). */
   #brand .icon-btn{opacity:0;pointer-events:none;max-width:0;padding:0;margin:0;overflow:hidden;transition:opacity .1s, max-width .1s;}
-  @media (hover:hover){ #brand:hover .icon-btn{opacity:1;pointer-events:auto;max-width:26px;padding:0;margin:0;} }
   #brand.show-actions .icon-btn{opacity:1;pointer-events:auto;max-width:26px;padding:0;margin:0;}
   #classeur-bar{
     display:flex;align-items:center;gap:4px;padding:8px 8px 4px 8px;
@@ -1192,7 +1190,7 @@ function openArchiveMenu(){
     }
   ]);
 }
-document.getElementById('archive-classeur-btn').onclick = openArchiveMenu;
+document.getElementById('archive-classeur-btn').onclick = (e)=>{ e.stopPropagation(); openArchiveMenu(); };
 
 function renderSidebar(){
   renderClasseurBar();
@@ -1333,37 +1331,17 @@ function handlePotentialDoubleClick(id, el){
   }
   return false;
 }
-// Un appui ailleurs (sur une autre section/page, ou n'importe où hors du menu d'actions révélé)
-// referme les icônes actuellement visibles.
+// Un appui ailleurs (sur une autre section/page/barre de classeur, ou n'importe où hors du menu
+// d'actions révélé) referme les icônes actuellement visibles.
 document.addEventListener('pointerdown', (e)=>{
   if(e.target.closest('.section-head, .page-item, #brand')) return;
   document.querySelectorAll('.show-actions').forEach(x=> x.classList.remove('show-actions'));
 }, true);
-// La barre des classeurs (#brand) garde son propre mécanisme (survol souris + appui long tactile) :
-// aucune plainte à son sujet, donc pas touchée par ce changement. Elle est statique (jamais
-// reconstruite comme les sections/pages) : on branche donc l'appui long une seule fois ici.
-setupLongPressReveal(document.getElementById('brand'));
-// Toujours utilisée par #brand ci-dessus (voir juste au-dessus) — plus utilisée pour section/page
-// depuis le passage au double-clic (voir handlePotentialDoubleClick).
-function setupLongPressReveal(el){
-  el.addEventListener('pointerdown', (e)=>{
-    if(e.pointerType !== 'touch') return; // la souris a déjà le survol
-    const startX = e.clientX, startY = e.clientY;
-    let moved = false, fired = false;
-    const timer = setTimeout(()=>{
-      if(moved) return;
-      document.querySelectorAll('.show-actions').forEach(x=>{ if(x!==el) x.classList.remove('show-actions'); });
-      el.classList.add('show-actions');
-      el._suppressNextClick = true;
-      fired = true;
-    }, 500);
-    function move(ev){ if(Math.hypot(ev.clientX-startX, ev.clientY-startY) > 12){ moved = true; clearTimeout(timer); } }
-    function up(){ clearTimeout(timer); el.removeEventListener('pointermove', move); el.removeEventListener('pointerup', up); el.removeEventListener('pointercancel', up); }
-    el.addEventListener('pointermove', move);
-    el.addEventListener('pointerup', up);
-    el.addEventListener('pointercancel', up);
-  });
-}
+// La barre des classeurs (#brand) suit maintenant la même règle double-clic/double-tap que les
+// sections/pages (voir handlePotentialDoubleClick ci-dessus) -- demande explicite de l'utilisateur
+// pour rester cohérent avec le changement fait sur les sections/pages. Un seul id fixe ('brand')
+// suffit ici : la barre est statique (jamais reconstruite), contrairement aux sections/pages.
+document.getElementById('brand').addEventListener('click', ()=> handlePotentialDoubleClick('brand', document.getElementById('brand')));
 
 function addSection(){
   const classeur = activeClasseur();
@@ -1406,7 +1384,7 @@ function addClasseur(){
   activeClasseurId = c.id; activeSectionId = s.id; activePageId = s.pages[0].id; activeSheetId = s.pages[0].sheets[0].id;
   save(); renderSidebar(); renderCanvasStack();
 }
-document.getElementById('add-classeur-btn').onclick = addClasseur;
+document.getElementById('add-classeur-btn').onclick = (e)=>{ e.stopPropagation(); addClasseur(); };
 
 function renameClasseur(){
   const c = activeClasseur();
@@ -1417,7 +1395,7 @@ function renameClasseur(){
   data.classeurs.sort((a,b)=> a.name.localeCompare(b.name, 'fr', {sensitivity:'base'}));
   save(); renderSidebar();
 }
-document.getElementById('rename-classeur-btn').onclick = renameClasseur;
+document.getElementById('rename-classeur-btn').onclick = (e)=>{ e.stopPropagation(); renameClasseur(); };
 
 // Suppression definitive effective (retrait local + tombstone pour que le prochain "Envoyer"
 // supprime aussi la copie cloud) -- partagee entre le bouton ✕ (confirmation simple, directe)
@@ -1439,7 +1417,7 @@ function deleteClasseur(){
   if(!confirm(`Supprimer le classeur "${c.name}" et tout son contenu ?`)) return;
   performDeleteClasseur(c);
 }
-document.getElementById('delete-classeur-btn').onclick = deleteClasseur;
+document.getElementById('delete-classeur-btn').onclick = (e)=>{ e.stopPropagation(); deleteClasseur(); };
 
 // Crée une NOUVELLE PAGE — un nouvel item dans la barre latérale — à l'index donné.
 // Utilisé uniquement par les actions explicites de la barre latérale.
