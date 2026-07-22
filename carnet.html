@@ -97,7 +97,10 @@
   /* Le survol ne concerne que les appareils avec une vraie souris : sur tactile, un simple appui
      déclenche aussi ":hover" dans la plupart des navigateurs, ce qui ferait apparaître ces icônes
      dès qu'on touche une section — on ne veut ça qu'après un appui long (voir plus bas, JS). */
-  @media (hover:hover){ .section-head:hover .section-actions{opacity:1;pointer-events:auto;max-width:140px;} }
+  /* Le survol seul ne declenche plus rien ici (voir plus bas, JS) : sur cette tablette, le stylet
+     declenche ":hover" des qu'il APPROCHE l'ecran (sans le toucher), et le doigt aussi via le
+     media hover:hover qui se comporte de facon peu fiable sur cet appareil -- demande explicite de
+     l'utilisateur, qui prefere un double-clic/double-tap avant l'affichage de ces icones. */
   .section-head.show-actions .section-actions{opacity:1;pointer-events:auto;max-width:140px;}
   .icon-btn{
     background:none;border:none;color:var(--text-muted);cursor:pointer;
@@ -126,7 +129,7 @@
      lieu d'être des boutons "nus" — sans ce regroupement, chaque bouton caché aurait quand même
      réservé sa largeur individuellement (même défaut que .section-actions plus haut). */
   .page-actions{display:flex;gap:2px;opacity:0;pointer-events:none;max-width:0;overflow:hidden;transition:opacity .1s, max-width .1s;}
-  @media (hover:hover){ .page-item:hover .page-actions{opacity:1;pointer-events:auto;max-width:140px;} }
+  /* Même raison que .section-head ci-dessus : double-clic/double-tap uniquement, plus de survol. */
   .page-item.show-actions .page-actions{opacity:1;pointer-events:auto;max-width:140px;}
   .move-menu{
     position:fixed;z-index:50;background:var(--bg-shop);border:1px solid var(--bg-shop-lighter);
@@ -1233,13 +1236,12 @@ function renderSidebar(){
     };
     head.querySelector('[data-action="delete-section"]').onclick = (e)=>{ e.stopPropagation(); deleteSection(section.id); };
     head.onclick = ()=>{
-      if(head._suppressNextClick){ head._suppressNextClick = false; return; }
+      if(handlePotentialDoubleClick(section.id, head)) return; // double-clic : bascule juste les icônes
       if(section.id===activeSectionId) return;
       activeSectionId = section.id; activePageId = section.pages[0]?.id || null;
       activeSheetId = section.pages[0]?.sheets[0]?.id || null;
       renderSidebar(); renderCanvasStack();
     };
-    setupLongPressReveal(head);
     block.appendChild(head);
 
     if(!collapsed[section.id]){
@@ -1260,7 +1262,7 @@ function renderSidebar(){
             <button class="icon-btn danger" data-action="delete-page" title="Supprimer la page">✕</button>
           </div>`;
         item.onclick = ()=>{
-          if(item._suppressNextClick){ item._suppressNextClick = false; return; }
+          if(handlePotentialDoubleClick(page.id, item)) return; // double-clic : bascule juste les icônes
           if(page.id===activePageId && section.id===activeSectionId) return;
           activeSectionId = section.id; activePageId = page.id; activeSheetId = page.sheets[0]?.id; selectedElId = null;
           renderSidebar();
@@ -1290,7 +1292,6 @@ function renderSidebar(){
           openMoveMenu(e.currentTarget, 'Déplacer "' + page.name + '" vers…', items);
         };
         item.querySelector('[data-action="delete-page"]').onclick = (e)=>{ e.stopPropagation(); deletePage(section.id, page.id); };
-        setupLongPressReveal(item);
         list.appendChild(item);
       });
       block.appendChild(list);
@@ -1311,12 +1312,39 @@ function scrollToPage(pageId){
 function escapeAttr(s){ return (s||'').replace(/"/g,'&quot;'); }
 function escapeHtml(s){ return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 
-// Sur souris, les icônes d'action d'une section/page apparaissent au survol (CSS). Sur tactile,
-// il n'y a pas de vrai survol : un simple appui déclenche quand même ":hover" dans la plupart des
-// navigateurs, ce qui ferait apparaître ces icônes dès qu'on touche l'élément — trop facile de
-// supprimer/déplacer par erreur. On les révèle donc plutôt via un appui long (500ms sans bouger),
-// en ajoutant la classe .show-actions (voir CSS), et on empêche le clic qui suit cet appui long de
-// déclencher la navigation normale (ouvrir la section/page).
+// Icônes d'action d'une section/page (renommer/exporter/déplacer/supprimer) : révélées par un
+// DOUBLE-clic/double-tap explicite, sur tout type de pointeur (souris, stylet, doigt) -- demande
+// explicite de l'utilisateur suite à un affichage trop facile au survol (le stylet déclenche
+// ":hover" dès qu'il approche l'écran sans le toucher, et le doigt aussi via un media hover:hover
+// peu fiable sur cette tablette). Détection manuelle par horodatage (par id de section/page, PAS
+// par référence à l'élément DOM) plutôt que l'événement natif "dblclick" : le premier clic d'une
+// paire déclenche déjà une navigation qui appelle renderSidebar() et reconstruit tout le DOM, donc
+// le 2e clic ne retomberait jamais sur LE MÊME élément DOM pour que "dblclick" se déclenche.
+const lastActionsClickAt = {};
+function handlePotentialDoubleClick(id, el){
+  const now = Date.now();
+  const last = lastActionsClickAt[id] || 0;
+  lastActionsClickAt[id] = now;
+  if(now - last < 400){
+    document.querySelectorAll('.show-actions').forEach(x=>{ if(x!==el) x.classList.remove('show-actions'); });
+    el.classList.toggle('show-actions');
+    lastActionsClickAt[id] = 0; // évite qu'un 3e clic rapproché ne re-bascule tout de suite
+    return true; // double-clic détecté : l'appelant ne doit PAS traiter ça comme une navigation normale
+  }
+  return false;
+}
+// Un appui ailleurs (sur une autre section/page, ou n'importe où hors du menu d'actions révélé)
+// referme les icônes actuellement visibles.
+document.addEventListener('pointerdown', (e)=>{
+  if(e.target.closest('.section-head, .page-item, #brand')) return;
+  document.querySelectorAll('.show-actions').forEach(x=> x.classList.remove('show-actions'));
+}, true);
+// La barre des classeurs (#brand) garde son propre mécanisme (survol souris + appui long tactile) :
+// aucune plainte à son sujet, donc pas touchée par ce changement. Elle est statique (jamais
+// reconstruite comme les sections/pages) : on branche donc l'appui long une seule fois ici.
+setupLongPressReveal(document.getElementById('brand'));
+// Toujours utilisée par #brand ci-dessus (voir juste au-dessus) — plus utilisée pour section/page
+// depuis le passage au double-clic (voir handlePotentialDoubleClick).
 function setupLongPressReveal(el){
   el.addEventListener('pointerdown', (e)=>{
     if(e.pointerType !== 'touch') return; // la souris a déjà le survol
@@ -1336,15 +1364,6 @@ function setupLongPressReveal(el){
     el.addEventListener('pointercancel', up);
   });
 }
-// Un appui ailleurs (sur une autre section/page, ou n'importe où hors du menu d'actions révélé)
-// referme les icônes actuellement visibles.
-document.addEventListener('pointerdown', (e)=>{
-  if(e.target.closest('.section-head, .page-item, #brand')) return;
-  document.querySelectorAll('.show-actions').forEach(x=> x.classList.remove('show-actions'));
-}, true);
-// La barre des classeurs (#brand) est statique (jamais reconstruite comme les sections/pages) :
-// on branche donc l'appui long une seule fois ici, plutot qu'a chaque rendu.
-setupLongPressReveal(document.getElementById('brand'));
 
 function addSection(){
   const classeur = activeClasseur();
