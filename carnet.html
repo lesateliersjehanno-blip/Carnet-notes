@@ -109,6 +109,10 @@
   .icon-btn:disabled{opacity:.35;cursor:not-allowed;}
   .icon-btn:disabled:hover{background:none;color:var(--text-muted);}
   #sort-sections-btn{width:auto;padding:0 6px;font-size:10px;font-family:var(--font-mono);}
+  /* Pousse le bouton "nouveau chantier" tout a droite de la barre, loin du bouton "masquer les
+     pages" juste a cote -- demande explicite de l'utilisateur suite a des clics accidentels sur le
+     mauvais bouton (les deux etaient cote a cote avec seulement 4px d'ecart). */
+  #add-section-icon-btn{margin-left:auto;}
   .pages-list{padding-left:14px;margin-top:2px;}
   .page-item{
     display:flex;align-items:center;gap:6px;padding:6px 8px;border-radius:6px;
@@ -386,7 +390,13 @@
   .safe-margin{
     position:absolute;inset:38px;border:1px dashed #d8d0be;pointer-events:none;
   }
-  .page-svg{position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;}
+  .page-svg{
+    position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;
+    /* Meme logique que .image-el ci-dessus, cote inverse : ce SVG est celui dont le contenu (le
+       trait en cours) change a chaque pointermove pendant l'ecriture -- l'isoler sur son propre
+       calque evite que le navigateur ne recompose inutilement les elements voisins (photos...). */
+    will-change: contents;
+  }
   path[data-el-id].selected{
     filter: drop-shadow(0 0 0 var(--accent)) drop-shadow(0 0 2.5px var(--accent));
   }
@@ -448,6 +458,11 @@
   .image-el{
     position:absolute;cursor:move;border:1px solid transparent;border-radius:3px;touch-action:none;
     z-index:0;
+    /* Isole chaque image sur son propre calque GPU : sans ça, le navigateur doit parfois re-peindre
+       le bitmap de la photo a chaque fois que le trait SVG par-dessus (voir .page-svg) est mis a
+       jour pendant l'ecriture, ce qui peut donner une sensation de decalage stylet, surtout sur
+       tablette (GPU plus faible qu'un PC). N'a aucun effet visuel, juste un indice de composition. */
+    will-change: transform;
   }
   /* Image collée "en premier plan" : passe au-dessus des traits de stylo (z-index:1) et des
      textes (z-index:2), au lieu de rester derrière comme une image normale. */
@@ -1334,10 +1349,16 @@ setupLongPressReveal(document.getElementById('brand'));
 function addSection(){
   const classeur = activeClasseur();
   if(!classeur) return;
-  const s = { id: uid(), name: 'Nouvelle section', orientation: 'portrait', pages: [{ id: uid(), name: 'Page 1', orientation: 'portrait', createdAt: dateJour(), sheets: [{ id: uid(), elements: [] }] }] };
-  classeur.sections.push(s);
-  activeSectionId = s.id; activePageId = s.pages[0].id; activeSheetId = s.pages[0].sheets[0].id;
-  save(); renderSidebar(); renderCanvasStack();
+  // Double confirmation avant creation -- demande explicite de l'utilisateur, suite a des clics
+  // accidentels sur ce bouton (voir aussi l'espacement CSS de #add-section-icon-btn plus haut).
+  showConfirmMessage(`Ajouter un nouveau chantier dans "${classeur.name}" ?`, ()=>{
+    showConfirmMessage(`Confirmer la création de ce nouveau chantier ?`, ()=>{
+      const s = { id: uid(), name: 'Nouvelle section', orientation: 'portrait', pages: [{ id: uid(), name: 'Page 1', orientation: 'portrait', createdAt: dateJour(), sheets: [{ id: uid(), elements: [] }] }] };
+      classeur.sections.push(s);
+      activeSectionId = s.id; activePageId = s.pages[0].id; activeSheetId = s.pages[0].sheets[0].id;
+      save(); renderSidebar(); renderCanvasStack();
+    });
+  });
 }
 
 /* ============ CLASSEURS ============ */
@@ -5918,6 +5939,11 @@ setInterval(autoBackup, AUTO_BACKUP_INTERVAL);
   activeSheetId = data.classeurs[0]?.sections[0]?.pages[0]?.sheets[0]?.id || null;
   restoreLastPosition();
   clampActiveRefs();
+  // Toutes les sections démarrent repliées (pages masquées dans la barre latérale) à l'ouverture
+  // de l'appli -- demande explicite de l'utilisateur. Non persisté exprès : une section dépliée à
+  // la main pendant la session le reste jusqu'à la fermeture de l'appli, où tout repart replié au
+  // prochain démarrage (même logique que collapse-all-btn, juste appliqué à TOUS les classeurs).
+  data.classeurs.forEach(c=> c.sections.forEach(s=>{ collapsed[s.id] = true; }));
   // Écrit tout de suite dans IndexedDB — utile en particulier juste après une migration depuis
   // l'ancien localStorage (ci-dessus), pour ne plus jamais avoir à y retoucher ensuite.
   trySetStorage(lastSavedRaw, {silent:true});
