@@ -87,6 +87,9 @@
   .section-head .name{
     flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-light);
   }
+  /* Chantier actif (celui de la page actuellement affichée) : couleur orange vif, plutôt que le
+     --accent existant (terracotta plus sourd) -- demande explicite de l'utilisateur. */
+  .section-head.active .name{ color:#ff6a00; }
   /* max-width:0 + overflow:hidden (au lieu du seul opacity:0) : un élément invisible mais encore
      display:flex réserve quand même sa place dans la ligne — ça grignotait la largeur dispo pour
      .name (flex:1) et coupait les noms de section en "…" même quand aucune icône n'était affichée.
@@ -1217,7 +1220,7 @@ function renderSidebar(){
     block.className = 'section-block';
 
     const head = document.createElement('div');
-    head.className = 'section-head' + (collapsed[section.id] ? ' collapsed' : '');
+    head.className = 'section-head' + (collapsed[section.id] ? ' collapsed' : '') + (section.id===activeSectionId ? ' active' : '');
     head.innerHTML = `
       <button class="icon-btn chev" data-action="toggle-collapse" title="Masquer / afficher les pages de cette section">▾</button>
       <span class="name">${escapeHtml(section.name)}</span>
