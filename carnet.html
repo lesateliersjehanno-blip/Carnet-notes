@@ -519,26 +519,32 @@
   .sheet-page-header{
     position:absolute;
     top:0; left:0; right:0;
-    height:78px;
+    min-height:78px;
     display:flex; align-items:center; justify-content:space-between;
-    padding:0 44px;
+    padding:14px 44px;
     pointer-events:none;
     z-index:4;
     border-bottom:2px solid var(--paper-line);
     background:var(--paper);
   }
-  .header-left{ display:flex; flex-direction:column; justify-content:center; }
+  /* flex:1 + min-width:0 : sans ça, un nom de chantier long ne pouvait ni vraiment rétrécir ni
+     passer à la ligne correctement à côté de la date -- il débordait et se retrouvait coupé/masqué
+     par le reste de la page à l'impression. min-height (au lieu de height fixe) ci-dessus laisse
+     l'en-tête grandir si le nom passe sur 2 lignes, plutôt que de couper la 2e ligne. */
+  .header-left{ display:flex; flex-direction:column; justify-content:center; flex:1; min-width:0; }
   .header-section{
     font-family:'Times New Roman', Times, serif;font-size:28px;font-weight:700;color:#000;
-    letter-spacing:.01em;text-transform:uppercase;line-height:1;
+    letter-spacing:.01em;text-transform:uppercase;line-height:1.15;
+    overflow-wrap:break-word;word-break:break-word;
   }
   .header-page{
     font-family:'Times New Roman', Times, serif;font-size:22px;font-weight:700;
     color:#8a8a8a;line-height:1.2;margin-top:2px;
+    overflow-wrap:break-word;word-break:break-word;
   }
   .header-date{
     font-family:var(--font-mono);font-size:13px;color:#a89e8c;
-    letter-spacing:.04em;
+    letter-spacing:.04em;flex-shrink:0;white-space:nowrap;margin-left:12px;
   }
 
   #empty-state{margin:auto;text-align:center;color:var(--text-muted);font-family:var(--font-mono);font-size:13px;}
@@ -549,6 +555,13 @@
     display:none;position:absolute;right:24px;bottom:16px;
     font-family:var(--font-mono);font-size:11px;color:#888;
   }
+  /* Nom du chantier, en bas à GAUCHE, sur CHAQUE page imprimée (pas juste la 1ère comme l'en-tête
+     ci-dessus) -- demande explicite de l'utilisateur, même style discret que le numéro de page. */
+  .print-page-footer{
+    display:none;position:absolute;left:24px;bottom:16px;max-width:60%;
+    font-family:var(--font-mono);font-size:11px;color:#888;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  }
   @media print{
     body *{visibility:hidden;}
     #print-area, #print-area *{visibility:visible;}
@@ -557,6 +570,7 @@
     .print-page:last-child{page-break-after:auto;}
     .print-page .safe-margin{display:none;}
     .print-page-number{display:block;}
+    .print-page-footer{display:block;}
   }
   @page{margin:0;}
 
@@ -632,6 +646,7 @@
         <button class="tool-btn labeled" title="Insérer une image depuis un fichier" onclick="insertImageFromPicker()">🖼 Image</button>
         <input type="file" id="image-input" accept="image/*" style="display:none" onchange="insertImageFromInput(event)">
         <button class="tool-btn labeled" id="print-icon-btn" title="Imprimer la page active (A4 portrait par défaut)" onclick="openPrintMenu()">⎙ Imprimer</button>
+        <button class="tool-btn labeled" id="delete-selection-toolbar-btn" title="Supprimer le contenu de la zone sélectionnée (trace d'abord une sélection avec ▭ Zone ou ➰ Lasso)" disabled>🗑 Suppr. sélection</button>
       </div>
       <div class="spacer"></div>
       <button class="tool-btn" id="update-app-btn" title="Vérifier les mises à jour et recharger la dernière version">🔄</button>
@@ -1630,6 +1645,7 @@ function setTool(t){
       pc._zoneSelection = null;
       clearStrokeOptions(pc);
     });
+    updateDeleteSelectionButton();
   }
 }
 
@@ -1975,6 +1991,7 @@ function renderCanvasStack(){
     empty.id = 'empty-state';
     empty.textContent = 'Crée une page pour commencer.';
     canvasWrap.appendChild(empty);
+    updateDeleteSelectionButton();
     return;
   }
 
@@ -2002,6 +2019,11 @@ function renderCanvasStack(){
   // offsetHeight juste ici oblige le navigateur à calculer la mise en page tout de suite, sans
   // attendre une interaction ultérieure pour s'en apercevoir.
   void canvasWrap.offsetHeight;
+  // Filet de sécurité pour le bouton "🗑 Suppr. sélection" de la barre d'outils : un re-rendu
+  // complet remplace TOUJOURS les éléments .page-canvas (donc leur éventuel _zoneSelection),
+  // donc on revérifie ici systématiquement plutôt que de compter uniquement sur les quelques
+  // endroits qui l'appellent déjà explicitement (clearZoneSelection, finalizeZoneSelection...).
+  updateDeleteSelectionButton();
 }
 
 // Bouton discret entre deux feuilles (ou après la dernière) pour insérer une feuille A4
@@ -2121,13 +2143,33 @@ function strokePathEl(el){
   return path;
 }
 
-// Un trait est enregistré comme "M x y L x y L x y ..." (voir endStroke) : on peut donc
-// le relire comme une simple liste de points pour la gomme "zone".
+// Un trait à main levée est désormais enregistré lissé ("M x y Q cx cy x y Q ...", voir
+// smoothPathD/endStroke) plutôt qu'en ligne brisée pure ("M x y L x y ...", toujours utilisé tel
+// quel pour les formes géométriques et les morceaux recoupés par la gomme "zone"). Dans les deux
+// cas on peut relire le tout comme une simple liste de points (les points de contrôle "Q" comptent
+// juste comme des points en plus, très proches de la vraie courbe — sans conséquence pratique pour
+// la gomme "zone", le calcul de cadre englobant ou le redimensionnement, qui restent inchangés).
 function strokeDToPoints(d){
-  const nums = d.replace(/[ML]/g,' ').trim().split(/\s+/).filter(Boolean).map(Number);
+  const nums = d.replace(/[MLQ]/g,' ').trim().split(/\s+/).filter(Boolean).map(Number);
   const pts = [];
   for(let i=0;i+1<nums.length;i+=2) pts.push([nums[i], nums[i+1]]);
   return pts;
+}
+// Lisse une liste de points bruts (échantillonnés pendant le tracé) en une courbe de Bézier
+// quadratique passant par le milieu de chaque paire de points consécutifs — technique classique de
+// lissage de dessin à main levée, peu coûteuse (une seule passe). Utilisée uniquement pour les
+// traits à main levée (voir endStroke) ; les formes géométriques (rectangle, ligne, cercle...)
+// continuent d'utiliser pointsToStrokeD (ligne brisée exacte, plus appropriée pour des formes).
+function smoothPathD(points){
+  if(points.length < 3) return 'M ' + points.map(p=>p[0]+' '+p[1]).join(' L ');
+  let d = `M ${points[0][0]} ${points[0][1]}`;
+  for(let i=1;i<points.length-1;i++){
+    const mx = (points[i][0]+points[i+1][0])/2, my = (points[i][1]+points[i+1][1])/2;
+    d += ` Q ${points[i][0]} ${points[i][1]} ${mx} ${my}`;
+  }
+  const last = points[points.length-1];
+  d += ` L ${last[0]} ${last[1]}`; // dernier point exact, pour finir pile où le stylet a été levé
+  return d;
 }
 function pointsToStrokeD(pts){
   return 'M ' + pts.map(p=>p[0]+' '+p[1]).join(' L ');
@@ -3359,6 +3401,7 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
     if(canvas._zoneRectEl){ canvas._zoneRectEl.remove(); canvas._zoneRectEl=null; }
     if(canvas._zoneActionsEl){ canvas._zoneActionsEl.remove(); canvas._zoneActionsEl=null; }
     canvas._zoneSelection = null;
+    updateDeleteSelectionButton();
   }
 
   // Après avoir tracé le rectangle, on affiche une petite barre flottante "Copier" juste en dessous.
@@ -3378,6 +3421,7 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
     }
     canvas._zoneRectEl = rectEl;
     canvas._zoneSelection = {x,y,w,h,points};
+    updateDeleteSelectionButton();
 
     const actions = document.createElement('div');
     actions.className = 'zone-actions';
@@ -3435,8 +3479,11 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
         btn.textContent = original;
       }
     };
-    actions.querySelector('[data-act="delete"]').onclick = (e)=>{
-      e.stopPropagation();
+    // Extrait en fonction nommée (plutôt qu'un onclick direct) pour pouvoir être appelée aussi
+    // depuis le bouton "🗑 Suppr. sélection" de la barre d'outils du haut (voir
+    // canvas._deleteZoneSelection ci-dessous et updateDeleteSelectionButton) -- même action,
+    // juste accessible à deux endroits, demande explicite de l'utilisateur.
+    function deleteCurrentZoneSelection(){
       // Un élément verrouillé (point rouge — voir el-lock) est protégé contre les suppressions
       // accidentelles au clic/glisser ; il doit l'être tout autant contre "Supprimer la zone",
       // sinon le verrou ne sert à rien dès qu'un trait ou du texte se trouve par-dessus une photo
@@ -3456,7 +3503,9 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
           ? `${lockedCount} éléments verrouillés (point rouge) ont été conservés.`
           : "Un élément verrouillé (point rouge) a été conservé.");
       }
-    };
+    }
+    canvas._deleteZoneSelection = deleteCurrentZoneSelection;
+    actions.querySelector('[data-act="delete"]').onclick = (e)=>{ e.stopPropagation(); deleteCurrentZoneSelection(); };
     actions.querySelector('[data-act="clear"]').onclick = (e)=>{ e.stopPropagation(); clearZoneSelection(); };
     canvas.appendChild(actions);
     canvas._zoneActionsEl = actions;
@@ -4000,8 +4049,9 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
       const y = (ev.clientY - rect.top)/scale;
       drawing.points.push([x,y]);
     });
-    const d = 'M ' + drawing.points.map(p=>p[0]+' '+p[1]).join(' L ');
-    canvas._livePath.setAttribute('d', d);
+    // Aperçu lissé pendant le tracé (voir smoothPathD) : évite un "saut" visuel entre ce qu'on
+    // voit en écrivant et ce qui est réellement enregistré une fois le stylet levé (endStroke).
+    canvas._livePath.setAttribute('d', smoothPathD(drawing.points));
   });
 
   function endStroke(e){
@@ -4042,7 +4092,11 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
       return;
     }
     if(tool==='pen' && drawing){
-      const d = 'M ' + drawing.points.map(p=>p[0]+' '+p[1]).join(' L ');
+      // Enregistré lissé (voir smoothPathD) plutôt qu'en ligne brisée pure -- l'écriture à main
+      // levée avait un aspect anguleux/pas net, demande explicite de l'utilisateur pour la rendre
+      // plus propre. N'affecte que les NOUVEAUX traits : les traits déjà existants dans le carnet
+      // ne sont pas retouchés rétroactivement par ce changement.
+      const d = smoothPathD(drawing.points);
       const el = { id: drawing.id, type:'stroke', color: drawing.color, width: drawing.width, highlight: drawing.highlight, d };
       if(drawing.points.length>1){
         sheet.elements.push(el); save();
@@ -4066,6 +4120,23 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
   canvas.addEventListener('pointerup', endStroke);
   canvas.addEventListener('pointerleave', endStroke);
 }
+
+// Bouton "🗑 Suppr. sélection" de la barre d'outils du haut (à côté d'Imprimer) : même action que
+// le 🗑 flottant qui apparaît au-dessus d'une sélection de zone (voir deleteCurrentZoneSelection
+// dans finalizeZoneSelection), juste accessible en permanence dans la barre principale -- demande
+// explicite de l'utilisateur. Toujours visible, mais désactivé tant qu'aucune sélection n'existe
+// sur la feuille actuellement affichée (voir tous les appels à updateDeleteSelectionButton, à
+// chaque endroit où une sélection de zone est créée/effacée).
+function updateDeleteSelectionButton(){
+  const btn = document.getElementById('delete-selection-toolbar-btn');
+  if(!btn) return;
+  const canvas = document.querySelector(`.page-canvas[data-sheet-id="${activeSheetId}"]`);
+  btn.disabled = !(canvas && canvas._zoneSelection);
+}
+document.getElementById('delete-selection-toolbar-btn').onclick = ()=>{
+  const canvas = document.querySelector(`.page-canvas[data-sheet-id="${activeSheetId}"]`);
+  if(canvas && canvas._deleteZoneSelection) canvas._deleteZoneSelection();
+};
 
 /* ============ PRINT ============ */
 function openPrintMenu(){
@@ -4093,6 +4164,16 @@ async function printSheets(sheets, orientation, title, sectionName, pageName){
     pageNum.className = 'print-page-number';
     pageNum.textContent = `${idx+1} / ${sheets.length}`;
     div.appendChild(pageNum);
+
+    // Nom du chantier en bas à gauche, sur TOUTES les pages (contrairement à l'en-tête juste en
+    // dessous, réservé à la 1ère page) -- demande explicite de l'utilisateur, pour repérer de quel
+    // chantier vient une page une fois imprimée séparément des autres.
+    if(sectionName){
+      const footer = document.createElement('div');
+      footer.className = 'print-page-footer';
+      footer.textContent = sectionName;
+      div.appendChild(footer);
+    }
 
     if(idx===0 && sectionName && pageName){
       const hdr = document.createElement('div');
@@ -4452,6 +4533,7 @@ function clearZoneSelectionOn(canvas){
   if(canvas._zoneRectEl){ canvas._zoneRectEl.remove(); canvas._zoneRectEl=null; }
   if(canvas._zoneActionsEl){ canvas._zoneActionsEl.remove(); canvas._zoneActionsEl=null; }
   canvas._zoneSelection = null;
+  updateDeleteSelectionButton();
 }
 // n pas de 90° sens horaire (n peut être négatif pour l'anti-horaire) appliqués à un vecteur.
 function rotateVector90ForZone(dx, dy, steps){
