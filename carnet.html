@@ -202,6 +202,8 @@
   .tool-btn:disabled{opacity:.3;cursor:not-allowed;}
   #stroke-delete-toolbar-btn{color:var(--danger);font-weight:700;}
   #stroke-delete-toolbar-btn:hover{background:var(--danger);color:#fff;}
+  /* Icône seule (pas de texte), agrandie -- demande explicite de l'utilisateur. */
+  #delete-selection-toolbar-btn{font-size:21px;}
   .tool-btn:disabled:hover{background:none;color:var(--text-muted);}
   /* Bouton de mise à jour manuelle : tout à droite de la barre du haut, uniquement une icône.
      Une rotation pendant la vérification donne un retour visuel qu'il se passe quelque chose. */
@@ -649,7 +651,7 @@
         <button class="tool-btn labeled" title="Insérer une image depuis un fichier" onclick="insertImageFromPicker()">🖼 Image</button>
         <input type="file" id="image-input" accept="image/*" style="display:none" onchange="insertImageFromInput(event)">
         <button class="tool-btn labeled" id="print-icon-btn" title="Imprimer la page active (A4 portrait par défaut)" onclick="openPrintMenu()">⎙ Imprimer</button>
-        <button class="tool-btn labeled" id="delete-selection-toolbar-btn" title="Supprimer le contenu de la zone sélectionnée (trace d'abord une sélection avec ▭ Zone ou ➰ Lasso)" disabled>🗑 Suppr. sélection</button>
+        <button class="tool-btn" id="delete-selection-toolbar-btn" title="Supprimer le contenu de la zone sélectionnée (trace d'abord une sélection avec ▭ Zone ou ➰ Lasso)" disabled>🗑</button>
       </div>
       <div class="spacer"></div>
       <button class="tool-btn" id="update-app-btn" title="Vérifier les mises à jour et recharger la dernière version">🔄</button>
