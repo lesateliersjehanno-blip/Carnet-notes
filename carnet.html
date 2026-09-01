@@ -708,7 +708,7 @@
 // À incrémenter à CHAQUE nouvelle version livrée (voir #app-version-label dans la sidebar et le
 // message affiché après un clic sur 🔄) -- sert de repère vérifiable pour confirmer qu'une mise à
 // jour a bien apporté une version plus récente, pas juste re-téléchargé ce qui était déjà en ligne.
-const APP_BUILD = 'v67';
+const APP_BUILD = 'v68';
 const PAGE_W = 794, PAGE_H = 1123; // A4 @ 96dpi, portrait
 const COLORS = ['#000000','#dc2626','#16a34a','#2563eb','#e8491d','#9333ea','#f5a623','#0891b2'];
 const HIGHLIGHT_COLORS = ['#fff176','#a5d6a7','#f48fb1','#90caf9','#ffb74d'];
@@ -6103,6 +6103,11 @@ if('serviceWorker' in navigator){
           const pad = n=> String(n).padStart(2,'0');
           const stamp = `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}h${pad(d.getMinutes())}m${pad(d.getSeconds())}`;
           localStorage.setItem('carnet_update_success_flag', stamp);
+          // Version ACTUELLE (avant rechargement) mémorisée à côté, pour pouvoir vérifier après coup
+          // qu'un numéro plus récent a bien été chargé -- voir la comparaison plus bas. Sans ça, le
+          // message affichait "mise à jour réussie" même quand GitHub Pages n'avait pas encore fini
+          // de publier le dernier envoi, et que le fichier rechargé était en fait... le même qu'avant.
+          localStorage.setItem('carnet_update_before_version', APP_BUILD);
         }catch(err){}
         location.reload();
       } else {
@@ -6119,12 +6124,31 @@ if('serviceWorker' in navigator){
 // le repère posé avant location.reload()) — sans ça, une mise à jour réussie ne se voyait qu'au
 // fait que la page clignote, sans aucune confirmation explicite.
 (function(){
-  let updateStamp = null;
+  let updateStamp = null, beforeVersion = null;
   try{
     updateStamp = localStorage.getItem('carnet_update_success_flag');
     if(updateStamp) localStorage.removeItem('carnet_update_success_flag');
+    beforeVersion = localStorage.getItem('carnet_update_before_version');
+    if(beforeVersion) localStorage.removeItem('carnet_update_before_version');
   }catch(err){}
-  if(updateStamp) showInfoMessage('✓ Mise à jour réussie ' + updateStamp + ' — tu as maintenant la version ' + APP_BUILD + '.');
+  if(!updateStamp) return;
+  // Compare le numéro de version d'AVANT le rechargement (beforeVersion) à celui de CE fichier
+  // (APP_BUILD) : le service worker répond "ok" dès qu'il a réussi à re-télécharger et re-mettre en
+  // cache carnet.html, MÊME si le contenu obtenu est identique à l'ancien (ex: GitHub Pages n'a pas
+  // encore fini de publier le dernier push, ou le push n'a en fait jamais été fait) -- dans ce cas,
+  // "Mise à jour réussie" serait un mensonge. On ne compte comme un vrai succès que si le numéro a
+  // AUGMENTÉ (peu importe de combien : plusieurs versions peuvent avoir été sautées si le bouton
+  // n'a pas été cliqué depuis un moment — décision explicite de l'utilisateur, voir la question
+  // posée à ce sujet). Sinon (identique, plus petit, ou illisible), on prévient que la mise à jour
+  // n'a probablement pas eu lieu plutôt que de faussement confirmer un succès.
+  const beforeNum = beforeVersion ? parseInt(beforeVersion.replace(/[^0-9]/g,''), 10) : NaN;
+  const afterNum = parseInt(String(APP_BUILD).replace(/[^0-9]/g,''), 10);
+  const improved = !isNaN(beforeNum) && !isNaN(afterNum) && afterNum > beforeNum;
+  if(!beforeVersion || improved){
+    showInfoMessage('✓ Mise à jour réussie ' + updateStamp + ' — tu as maintenant la version ' + APP_BUILD + '.');
+  } else {
+    showInfoMessage(`⚠️ La mise à jour n'a probablement pas eu lieu : toujours la version ${APP_BUILD} (comme avant). GitHub n'a peut-être pas encore fini de publier ton dernier envoi — attends une minute et réessaie "🔄".`);
+  }
 })();
 </script>
 </body>
