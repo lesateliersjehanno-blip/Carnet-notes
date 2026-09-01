@@ -624,6 +624,7 @@
       </div>
       <input type="file" id="import-input" accept="application/json" style="display:none" onchange="importData(event)">
       <input type="file" id="restore-classeur-input" accept="application/json" style="display:none" onchange="restoreClasseurFileChange(event)">
+      <div class="storage-row" id="app-version-row" style="opacity:.5;">Version <span id="app-version-label"></span></div>
     </div>
   </div>
 
@@ -704,6 +705,10 @@
 
 <script>
 /* ============ CONSTANTS ============ */
+// À incrémenter à CHAQUE nouvelle version livrée (voir #app-version-label dans la sidebar et le
+// message affiché après un clic sur 🔄) -- sert de repère vérifiable pour confirmer qu'une mise à
+// jour a bien apporté une version plus récente, pas juste re-téléchargé ce qui était déjà en ligne.
+const APP_BUILD = 'v67';
 const PAGE_W = 794, PAGE_H = 1123; // A4 @ 96dpi, portrait
 const COLORS = ['#000000','#dc2626','#16a34a','#2563eb','#e8491d','#9333ea','#f5a623','#0891b2'];
 const HIGHLIGHT_COLORS = ['#fff176','#a5d6a7','#f48fb1','#90caf9','#ffb74d'];
@@ -6050,6 +6055,14 @@ setInterval(autoBackup, AUTO_BACKUP_INTERVAL);
 // Active le mode hors-ligne (voir sw.js) : une fois ce script exécuté au moins une fois avec une
 // connexion, le carnet reste utilisable sans internet ensuite — et surtout, ça permet de garder
 // un accès fiable au presse-papier même hors-ligne (voir le commentaire détaillé dans sw.js).
+// Affiche en permanence, tout en bas de la barre latérale, le numéro de version de CE fichier
+// (voir APP_BUILD) -- repère vérifiable pour confirmer qu'une mise à jour a bien apporté une
+// version plus récente : le message "Mise à jour réussie" (voir plus bas) confirme seulement que
+// le fichier a été re-téléchargé avec succès, pas qu'il s'agit forcément d'une version différente
+// de celle d'avant (ex: si GitHub Pages n'a pas encore fini de publier le dernier push).
+const versionLabelEl = document.getElementById('app-version-label');
+if(versionLabelEl) versionLabelEl.textContent = APP_BUILD;
+
 if('serviceWorker' in navigator){
   window.addEventListener('load', ()=>{
     navigator.serviceWorker.register('./sw.js').catch(()=>{});
@@ -6111,7 +6124,7 @@ if('serviceWorker' in navigator){
     updateStamp = localStorage.getItem('carnet_update_success_flag');
     if(updateStamp) localStorage.removeItem('carnet_update_success_flag');
   }catch(err){}
-  if(updateStamp) showInfoMessage('✓ Mise à jour réussie ' + updateStamp + ' — tu as la dernière version.');
+  if(updateStamp) showInfoMessage('✓ Mise à jour réussie ' + updateStamp + ' — tu as maintenant la version ' + APP_BUILD + '.');
 })();
 </script>
 </body>
