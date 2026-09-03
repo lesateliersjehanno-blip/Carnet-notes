@@ -48,6 +48,16 @@ self.addEventListener('activate', (event) => {
 // de fond dès qu'une connexion est disponible, pour la prochaine visite.
 self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
+  // Ne jamais intercepter les requetes vers un AUTRE site (notamment le serveur de synchro
+  // Tailscale, qui n'a rien a voir avec le cache hors-ligne de l'appli elle-meme) : on les laisse
+  // passer directement au reseau, sans mise en cache ni "secours" de remplacement. Avant ce
+  // correctif, le moindre rate reseau ponctuel vers le serveur de synchro (ou meme une vraie
+  // erreur du serveur) etait systematiquement remplace ici par un faux "503" generique
+  // ("Hors ligne et pas encore en cache."), qui masquait la VRAIE cause de l'echec de
+  // recuperation/envoi affichee dans le carnet -- rendant le diagnostic impossible. Ne s'applique
+  // qu'aux requetes vers CE site (l'appli elle-meme et ses polices/SDK listes dans EXTRA_URLS).
+  const reqUrl = new URL(event.request.url);
+  if (reqUrl.origin !== self.location.origin) return;
   event.respondWith((async () => {
     const cache = await caches.open(CACHE_NAME);
     const cached = await cache.match(event.request);
