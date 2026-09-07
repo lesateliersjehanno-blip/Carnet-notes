@@ -708,7 +708,7 @@
 // À incrémenter à CHAQUE nouvelle version livrée (voir #app-version-label dans la sidebar et le
 // message affiché après un clic sur 🔄) -- sert de repère vérifiable pour confirmer qu'une mise à
 // jour a bien apporté une version plus récente, pas juste re-téléchargé ce qui était déjà en ligne.
-const APP_BUILD = 'v68';
+const APP_BUILD = 'v69';
 const PAGE_W = 794, PAGE_H = 1123; // A4 @ 96dpi, portrait
 const COLORS = ['#000000','#dc2626','#16a34a','#2563eb','#e8491d','#9333ea','#f5a623','#0891b2'];
 const HIGHLIGHT_COLORS = ['#fff176','#a5d6a7','#f48fb1','#90caf9','#ffb74d'];
@@ -3926,7 +3926,16 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
 
       function startStroke(px, py){
         if(shapeMode==='free'){
-          drawing = { id: uid(), type:'stroke', color: strokeColor, width: strokeWidth, highlight: highlightMode, points:[[px,py]], pointerType: e.pointerType, downAt: Date.now(), pointerId: e.pointerId };
+          // builtD/builtIndex : construction INCREMENTALE de l'aperçu en cours de tracé (voir la
+          // mise à jour dans pointermove ci-dessous) -- sans ça, smoothPathD() recalculait tout
+          // le trait depuis le tout premier point à CHAQUE mouvement, un travail qui grandit avec
+          // la longueur du trait déjà tracé (coût quadratique total sur un trait long, ex. un mot
+          // entier écrit sans lever le stylet) : c'est la cause principale du décalage stylet
+          // ressenti pendant l'écriture, amplifié par-dessus une photo (qui ajoute son propre
+          // coût de repeint). N'affecte que l'APERÇU pendant le tracé -- le trait définitif
+          // enregistré dans endStroke recalcule toujours via smoothPathD() (appelé une seule
+          // fois par trait, donc sans coût), strictement identique à avant.
+          drawing = { id: uid(), type:'stroke', color: strokeColor, width: strokeWidth, highlight: highlightMode, points:[[px,py]], pointerType: e.pointerType, downAt: Date.now(), pointerId: e.pointerId, builtD: `M ${px} ${py}`, builtIndex: 1 };
           const path = strokePathEl({...drawing, d:`M ${px} ${py}`});
           path._live = drawing;
           svg.appendChild(path);
@@ -4061,7 +4070,19 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
     });
     // Aperçu lissé pendant le tracé (voir smoothPathD) : évite un "saut" visuel entre ce qu'on
     // voit en écrivant et ce qui est réellement enregistré une fois le stylet levé (endStroke).
-    canvas._livePath.setAttribute('d', smoothPathD(drawing.points));
+    // Construction INCREMENTALE (voir commentaire dans startStroke) : on ne recalcule QUE le/les
+    // nouveau(x) segment(s) Q apparus depuis le dernier mouvement, jamais tout le trait depuis le
+    // début -- reproduit exactement le même 'd' que smoothPathD(drawing.points) aurait produit,
+    // juste sans repayer à chaque fois le travail déjà fait sur la partie déjà tracée.
+    while (drawing.builtIndex < drawing.points.length - 1) {
+      const bi = drawing.builtIndex;
+      const bp = drawing.points[bi], bpNext = drawing.points[bi+1];
+      const bmx = (bp[0]+bpNext[0])/2, bmy = (bp[1]+bpNext[1])/2;
+      drawing.builtD += ` Q ${bp[0]} ${bp[1]} ${bmx} ${bmy}`;
+      drawing.builtIndex++;
+    }
+    const liveLast = drawing.points[drawing.points.length-1];
+    canvas._livePath.setAttribute('d', drawing.builtD + ` L ${liveLast[0]} ${liveLast[1]}`);
   });
 
   function endStroke(e){
