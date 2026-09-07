@@ -708,7 +708,7 @@
 // À incrémenter à CHAQUE nouvelle version livrée (voir #app-version-label dans la sidebar et le
 // message affiché après un clic sur 🔄) -- sert de repère vérifiable pour confirmer qu'une mise à
 // jour a bien apporté une version plus récente, pas juste re-téléchargé ce qui était déjà en ligne.
-const APP_BUILD = 'v69';
+const APP_BUILD = 'v70';
 const PAGE_W = 794, PAGE_H = 1123; // A4 @ 96dpi, portrait
 const COLORS = ['#000000','#dc2626','#16a34a','#2563eb','#e8491d','#9333ea','#f5a623','#0891b2'];
 const HIGHLIGHT_COLORS = ['#fff176','#a5d6a7','#f48fb1','#90caf9','#ffb74d'];
@@ -1260,9 +1260,18 @@ function renderSidebar(){
     head.querySelector('[data-action="delete-section"]').onclick = (e)=>{ e.stopPropagation(); deleteSection(section.id); };
     head.onclick = ()=>{
       if(handlePotentialDoubleClick(section.id, head)) return; // double-clic : bascule juste les icônes
-      if(section.id===activeSectionId) return;
-      activeSectionId = section.id; activePageId = section.pages[0]?.id || null;
-      activeSheetId = section.pages[0]?.sheets[0]?.id || null;
+      // Un clic sur le chantier affiche TOUJOURS toutes ses pages (demande explicite) -- même s'il
+      // était déjà le chantier actif mais replié via le chevron ▾. On ne réinitialise la page
+      // affichée (première page) que si on CHANGE réellement de chantier, pour ne pas perdre la
+      // page en cours si on re-clique juste pour redéplier celui déjà actif.
+      const changingSection = section.id !== activeSectionId;
+      if(!changingSection && !collapsed[section.id]) return; // déjà actif et déjà déplié : rien à faire
+      activeSectionId = section.id;
+      if(changingSection){
+        activePageId = section.pages[0]?.id || null;
+        activeSheetId = section.pages[0]?.sheets[0]?.id || null;
+      }
+      collapsed[section.id] = false;
       renderSidebar(); renderCanvasStack();
     };
     block.appendChild(head);
