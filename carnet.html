@@ -414,13 +414,14 @@
     border:1px solid transparent;border-radius:3px;cursor:move;touch-action:none;z-index:2;
   }
   .text-el:hover{border-color:#d8d0be;}
-  .text-el.editing{cursor:text;border-color:var(--accent-soft);background:rgba(255,255,255,.5);}
+  .text-el.editing{cursor:text;}
   .text-el.selected{border-color:var(--accent);}
   /* Texte "ancré" : ne réagit plus au clic/glisser (le doigt peut défiler par-dessus),
      seul le petit point reste cliquable pour le déverrouiller. */
-  .text-el.locked{pointer-events:none;cursor:default;touch-action:pan-x pan-y;}
+  .text-el.locked{cursor:default;touch-action:pan-x pan-y;}
   .text-el.locked .el-lock{pointer-events:auto;}
-  .text-el:hover .el-lock, .text-el.selected .el-lock, .text-el.locked .el-lock{opacity:1;}
+  .text-el .el-lock{opacity:0;}
+  .text-el:hover .el-lock{opacity:1;}
   .text-options{
     position:absolute;top:calc(100% + 5px);left:0;display:none;gap:6px;align-items:center;background:var(--bg-shop);
     border:1px solid var(--bg-shop-lighter);border-radius:8px;padding:5px 6px;
@@ -708,7 +709,7 @@
 // À incrémenter à CHAQUE nouvelle version livrée (voir #app-version-label dans la sidebar et le
 // message affiché après un clic sur 🔄) -- sert de repère vérifiable pour confirmer qu'une mise à
 // jour a bien apporté une version plus récente, pas juste re-téléchargé ce qui était déjà en ligne.
-const APP_BUILD = 'v70';
+const APP_BUILD = 'v75';
 const PAGE_W = 794, PAGE_H = 1123; // A4 @ 96dpi, portrait
 const COLORS = ['#000000','#dc2626','#16a34a','#2563eb','#e8491d','#9333ea','#f5a623','#0891b2'];
 const HIGHLIGHT_COLORS = ['#fff176','#a5d6a7','#f48fb1','#90caf9','#ffb74d'];
@@ -2499,6 +2500,14 @@ function tryStartZoneGroupMove(canvas, sheet, e){
   return true;
 }
 
+// Relit le contenu d'un texte en cours d'édition en convertissant ses <br> (voir le keydown
+// Entrée dans textElDom) en vrais caractères '\n' -- .textContent seul les ignore complètement,
+// ce qui faisait disparaître toutes les lignes sauf la première une fois le texte enregistré.
+function extractTextWithBreaks(div){
+  const clone = div.cloneNode(true);
+  clone.querySelectorAll('br').forEach(br=> br.replaceWith(document.createTextNode('\n')));
+  return clone.textContent;
+}
 function textElDom(el, page){
   const div = document.createElement('div');
   div.className = 'text-el' + (el.locked ? ' locked' : '');
@@ -2690,17 +2699,14 @@ function textElDom(el, page){
     div.contentEditable = 'false';
     div.classList.remove('editing');
     if(activeTextEdit && activeTextEdit.el===el) activeTextEdit = null;
-    el.text = div.textContent;
+    el.text = extractTextWithBreaks(div);
     if(el.text.trim()===''){
       div.remove();
       page.elements = page.elements.filter(x=>x.id!==el.id);
     } else {
-      // Verrouille automatiquement une fois la frappe terminée : évite de déplacer le texte
-      // par erreur en faisant défiler au doigt juste après l'avoir écrit.
-      el.locked = true;
-      div.classList.add('locked');
-      lock.classList.add('locked');
-      lock.title = 'Verrouillé (point rouge) — clique pour déverrouiller';
+      // Ne verrouille plus automatiquement (retour utilisateur explicite : le texte doit rester
+      // déplaçable tout de suite après l'écriture, comme dans Word) -- le petit point de verrou
+      // reste là si jamais on veut figer volontairement un texte précis.
       div.appendChild(lock);
       div.appendChild(opts);
       div.appendChild(resize);
@@ -2708,11 +2714,25 @@ function textElDom(el, page){
     }
     save();
   };
+  // Entrée : insère un vrai saut de ligne (<br>) plutôt que de laisser le navigateur créer un
+  // nouveau bloc <div> par ligne (comportement par défaut d'un contentEditable) -- sans ça,
+  // extractTextWithBreaks() ci-dessous ne pouvait pas distinguer où étaient les sauts de ligne,
+  // et le texte ré-enregistré perdait toutes les lignes sauf la première (elles se retrouvaient
+  // collées bout à bout à la relecture). Voir aussi l'affichage initial (div.textContent =
+  // el.text) : un '\n' dans le texte s'affiche déjà correctement grâce à white-space:pre/pre-wrap,
+  // aucun changement nécessaire de ce côté.
+  div.onkeydown = (e)=>{
+    if(e.key==='Enter'){
+      e.preventDefault();
+      document.execCommand('insertLineBreak');
+    }
+  };
   div.onpointerdown = (e)=>{
     if(tool!=='select') return; // hors mode Sélection : laisser l'événement atteindre le canvas (dessin/gomme/zone)
     if(e.pointerType==='pen' && e.pressure===0) return; // survol du stylet, pas de contact réel
     if(div.contentEditable==='true') return;
     if(e.target===resize || e.target===del || e.target===lock) return;
+    if(el.locked && e.pointerType==='touch') return; // verrouillé : le doigt continue de faire défiler, mais stylet/souris peuvent quand même le déplacer directement (voir CSS .text-el.locked)
     const canvas = div.closest('.page-canvas');
     if(canvas && tryStartZoneGroupMove(canvas, page, e)) return;
     e.stopPropagation();
@@ -3840,6 +3860,65 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
         return;
       }
 
+      // Un clic sur un texte déjà écrit l'ÉDITE directement au lieu d'empiler un nouveau texte
+      // par-dessus -- demande explicite : pouvoir cliquer n'importe où, y compris sur du texte
+      // existant, pour le corriger, comme dans Word. Fonctionne même si ce texte est verrouillé :
+      // le verrou ne protège que du glissement accidentel au doigt en faisant défiler (voir son
+      // usage ailleurs), pas de l'édition volontaire depuis l'outil Texte lui-même.
+      const hitText = findTextAt(canvas, sheet, x, y);
+      if(hitText){
+        const dom = canvas.querySelector(`.text-el[data-el-id="${hitText.id}"]`);
+        if(dom){
+          // Un clic simple édite ce texte (curseur placé au point cliqué) ; un GLISSER déplace ce
+          // texte à la place, sans quitter l'outil Texte -- demande explicite : pouvoir
+          // sélectionner/déplacer un texte directement depuis cet outil, comme dans Word, sans
+          // devoir basculer sur ↖ Sélection. Même seuil de mouvement (8px) que les autres gestes
+          // tap-vs-glisser de ce fichier (voir startImageTouchEdit par exemple).
+          canvas.setPointerCapture(e.pointerId);
+          const startClientX = e.clientX, startClientY = e.clientY;
+          const ox = hitText.x, oy = hitText.y;
+          let moved = false;
+          function moveText(ev){
+            if(!moved && Math.hypot(ev.clientX-startClientX, ev.clientY-startClientY) > 8) moved = true;
+            if(moved){
+              hitText.x = ox + (ev.clientX-startClientX);
+              hitText.y = oy + (ev.clientY-startClientY);
+              dom.style.left = hitText.x+'px';
+              dom.style.top = hitText.y+'px';
+            }
+          }
+          function upText(ev){
+            canvas.removeEventListener('pointermove', moveText);
+            canvas.removeEventListener('pointerup', upText);
+            canvas.removeEventListener('pointercancel', upText);
+            if(moved){ save(); return; }
+            // Pas de glissement : clic simple -> édite le texte, curseur au point cliqué plutôt
+            // que tout sélectionner, pour pouvoir corriger un mot précis sans risquer d'effacer
+            // tout le texte par une frappe accidentelle juste après avoir cliqué.
+            Array.from(dom.children).forEach(child=>child.remove());
+            dom.contentEditable = 'true';
+            dom.classList.add('editing');
+            dom.focus();
+            activeTextEdit = { el: hitText, div: dom };
+            let range = null;
+            if(document.caretRangeFromPoint){
+              range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+            } else if(document.caretPositionFromPoint){
+              const pos = document.caretPositionFromPoint(ev.clientX, ev.clientY);
+              if(pos && pos.offsetNode){ range = document.createRange(); range.setStart(pos.offsetNode, pos.offset); range.collapse(true); }
+            }
+            if(range){
+              const sel = window.getSelection();
+              sel.removeAllRanges();
+              sel.addRange(range);
+            }
+          }
+          canvas.addEventListener('pointermove', moveText);
+          canvas.addEventListener('pointerup', upText);
+          canvas.addEventListener('pointercancel', upText);
+          return;
+        }
+      }
       const el = { id: uid(), type:'text', x: x, y: y-12, w: 220, color: penColor, fontSize: textFontSize, fontFamily: textFontFamily, bold: textBold, italic: textItalic, underline: textUnderline, highlightColor: textHighlightColor, text: '' };
       sheet.elements.push(el);
       const dom = textElDom(el, sheet);
@@ -4509,6 +4588,25 @@ function findImageAt(sheet, x, y){
     if(el.type==='image' && x>=el.x && x<=el.x+el.w && y>=el.y && y<=el.y+el.h) found = el;
   });
   return found;
+}
+// Teste si (x,y) [coordonnées feuille, comme partout ailleurs dans ce fichier] tombe sur un texte
+// déjà écrit -- contrairement à findImageAt ci-dessus, on ne peut pas se fier à des x/y/w/h
+// stockés dans les données : la largeur d'un texte s'adapte à son contenu tant qu'il n'a pas été
+// explicitement élargi (voir el.wrap), et sa hauteur n'est de toute façon jamais stockée. On se
+// base donc sur la position/taille RÉELLEMENT rendues (offsetLeft/Top/Width/Height), seule source
+// fiable. Utilisé par l'outil Texte (voir plus bas) pour éditer un texte existant au lieu d'en
+// empiler un nouveau par-dessus au clic.
+function findTextAt(canvas, sheet, x, y){
+  const els = canvas.querySelectorAll('.text-el');
+  for(let i=els.length-1;i>=0;i--){ // du plus "au-dessus" (ajouté en dernier dans le DOM) au plus dessous
+    const div = els[i];
+    const left = div.offsetLeft, top = div.offsetTop, w = div.offsetWidth, h = div.offsetHeight;
+    if(x>=left && x<=left+w && y>=top && y<=top+h){
+      const found = sheet.elements.find(el=>el.id===div.dataset.elId && el.type==='text');
+      if(found) return found;
+    }
+  }
+  return null;
 }
 function strokeBBox(el){
   const pts = strokeDToPoints(el.d);
