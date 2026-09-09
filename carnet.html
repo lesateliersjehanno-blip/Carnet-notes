@@ -710,7 +710,7 @@
 // À incrémenter à CHAQUE nouvelle version livrée (voir #app-version-label dans la sidebar et le
 // message affiché après un clic sur 🔄) -- sert de repère vérifiable pour confirmer qu'une mise à
 // jour a bien apporté une version plus récente, pas juste re-téléchargé ce qui était déjà en ligne.
-const APP_BUILD = 'v77';
+const APP_BUILD = 'v78';
 const PAGE_W = 794, PAGE_H = 1123; // A4 @ 96dpi, portrait
 const COLORS = ['#000000','#dc2626','#16a34a','#2563eb','#e8491d','#9333ea','#f5a623','#0891b2'];
 const HIGHLIGHT_COLORS = ['#fff176','#a5d6a7','#f48fb1','#90caf9','#ffb74d'];
@@ -3397,6 +3397,77 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
     canvas.addEventListener('pointercancel', up);
   }
 
+  // Doigt posé en outil Texte : un GLISSER fait défiler comme avant, mais un TAP simple (sans
+  // bouger) écrit ici au clavier, exactement comme un clic au stylet/souris -- demande explicite :
+  // pouvoir écrire sans stylet, au doigt, sur tablette. `cancel` (jamais `up`) est ce qu'on branche
+  // sur canvas._touchPanUp : un pincement à 2 doigts qui démarre (voir 'pinch-start' plus haut)
+  // force l'arrêt de ce geste SANS jamais déclencher l'écriture, même si le doigt n'avait pas
+  // encore bougé au moment du pincement.
+  function startTouchTypeOrPan(e, x, y){
+    e.preventDefault();
+    try{ canvas.setPointerCapture(e.pointerId); }catch(err){}
+    const startX = e.clientX, startY = e.clientY;
+    const startScrollLeft = canvasWrap.scrollLeft, startScrollTop = canvasWrap.scrollTop;
+    let moved = false;
+    function move(ev){
+      if(pinching) return; // un 2e doigt a posé entre-temps : le pincement prend le relais (voir 'pinch-start')
+      if(!moved && Math.hypot(ev.clientX-startX, ev.clientY-startY) > 12) moved = true;
+      if(moved){
+        canvasWrap.scrollLeft = startScrollLeft - (ev.clientX-startX);
+        canvasWrap.scrollTop = startScrollTop - (ev.clientY-startY);
+      }
+    }
+    function cleanupTypeOrPan(){
+      canvas.removeEventListener('pointermove', move);
+      canvas.removeEventListener('pointerup', up);
+      canvas.removeEventListener('pointercancel', cancel);
+      if(canvas._touchPanUp===cancel) canvas._touchPanUp = null;
+    }
+    function cancel(){ cleanupTypeOrPan(); }
+    function up(ev){
+      cleanupTypeOrPan();
+      if(moved) return; // défilement : rien d'autre à faire
+      const hitText = findTextAt(canvas, sheet, x, y);
+      if(hitText){
+        const dom = canvas.querySelector(`.text-el[data-el-id="${hitText.id}"]`);
+        if(dom){
+          Array.from(dom.children).forEach(child=>child.remove());
+          dom.contentEditable = 'true';
+          dom.classList.add('editing');
+          dom.focus();
+          activeTextEdit = { el: hitText, div: dom };
+          let range = null;
+          if(document.caretRangeFromPoint){
+            range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+          } else if(document.caretPositionFromPoint){
+            const pos = document.caretPositionFromPoint(ev.clientX, ev.clientY);
+            if(pos && pos.offsetNode){ range = document.createRange(); range.setStart(pos.offsetNode, pos.offset); range.collapse(true); }
+          }
+          if(range){
+            const sel = window.getSelection();
+            sel.removeAllRanges();
+            sel.addRange(range);
+          }
+          return;
+        }
+      }
+      const el = { id: uid(), type:'text', x: x, y: y-12, w: 220, color: penColor, fontSize: textFontSize, fontFamily: textFontFamily, bold: textBold, italic: textItalic, underline: textUnderline, highlightColor: textHighlightColor, text: '' };
+      sheet.elements.push(el);
+      const dom = textElDom(el, sheet);
+      canvas.appendChild(dom);
+      Array.from(dom.children).forEach(child=>child.remove());
+      dom.contentEditable='true';
+      dom.classList.add('editing');
+      dom.focus();
+      activeTextEdit = { el, div: dom };
+      save();
+    }
+    canvas._touchPanUp = cancel;
+    canvas.addEventListener('pointermove', move);
+    canvas.addEventListener('pointerup', up);
+    canvas.addEventListener('pointercancel', cancel);
+  }
+
   // Doigt posé sur une image NON verrouillée, en outil Stylo : appui long (comme au stylet, voir
   // plus bas) la sélectionne pour pouvoir la déplacer, l'agrandir et la verrouiller (poignées de
   // la sélection, voir imageElDom) SANS avoir à changer d'outil. Un mouvement avant la fin du
@@ -3812,8 +3883,9 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
       return;
     }
     if(tool==='text'){
-      // Un doigt sert à faire défiler (même en Texte, normalement réservé au stylet/souris).
-      if(e.pointerType==='touch'){ startTouchPan(e); return; }
+      // Un doigt écrit maintenant comme le stylet (tap simple), un glisser continue de faire
+      // défiler -- voir startTouchTypeOrPan (demande explicite : écrire sans stylet, sur tablette).
+      if(e.pointerType==='touch'){ startTouchTypeOrPan(e, x, y); return; }
       e.preventDefault();
 
       // Une sélection de zone est déjà affichée (voir plus haut, appui long/clic droit) et le
