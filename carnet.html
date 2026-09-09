@@ -414,7 +414,8 @@
     border:1px solid transparent;border-radius:3px;cursor:move;touch-action:none;z-index:2;
   }
   .text-el:hover{border-color:#d8d0be;}
-  .text-el.editing{cursor:text;}
+  .text-el.editing{cursor:text;border-color:transparent;}
+  .text-el.editing:hover{border-color:transparent;}
   .text-el.selected{border-color:var(--accent);}
   /* Texte "ancré" : ne réagit plus au clic/glisser (le doigt peut défiler par-dessus),
      seul le petit point reste cliquable pour le déverrouiller. */
@@ -709,7 +710,7 @@
 // À incrémenter à CHAQUE nouvelle version livrée (voir #app-version-label dans la sidebar et le
 // message affiché après un clic sur 🔄) -- sert de repère vérifiable pour confirmer qu'une mise à
 // jour a bien apporté une version plus récente, pas juste re-téléchargé ce qui était déjà en ligne.
-const APP_BUILD = 'v75';
+const APP_BUILD = 'v77';
 const PAGE_W = 794, PAGE_H = 1123; // A4 @ 96dpi, portrait
 const COLORS = ['#000000','#dc2626','#16a34a','#2563eb','#e8491d','#9333ea','#f5a623','#0891b2'];
 const HIGHLIGHT_COLORS = ['#fff176','#a5d6a7','#f48fb1','#90caf9','#ffb74d'];
@@ -780,8 +781,13 @@ let highlightMode = false; // true = trace au fluo (translucide, plus épais) au
 let highlightColor = HIGHLIGHT_COLORS[0];
 const ERASER_SIZES = [16,30,50];
 let eraserSize = ERASER_SIZES[1]; // le carré du milieu, par défaut
-let textFontSize = 16;       // taille utilisée pour les PROCHAINES zones de texte créées
-let textFontFamily = 'hand'; // police utilisée pour les PROCHAINES zones de texte créées
+const TEXT_FONT_SIZE_KEY = 'carnet_text_font_size_v1';
+const TEXT_FONT_FAMILY_KEY = 'carnet_text_font_family_v1';
+// Reprend la dernière police/taille choisie (voir text-size-select / text-font-select plus bas),
+// avec un repli sur les valeurs par défaut d'origine si rien n'a encore été enregistré ou si la
+// valeur stockée est invalide (ex. ancienne version, storage corrompu).
+let textFontSize = parseInt(localStorage.getItem(TEXT_FONT_SIZE_KEY), 10) || 16;       // taille utilisée pour les PROCHAINES zones de texte créées
+let textFontFamily = localStorage.getItem(TEXT_FONT_FAMILY_KEY) || 'hand'; // police utilisée pour les PROCHAINES zones de texte créées
 let textBold = false, textItalic = false, textUnderline = false; // style utilisé pour les PROCHAINES zones de texte
 let activeTextEdit = null;   // { el, div } — le texte en cours d'édition, pour appliquer les changements en direct
 let activeStrokeEdit = null; // { el, pathEl } — le trait actuellement sélectionné, pour changer sa couleur/épaisseur depuis la barre d'outils
@@ -1706,6 +1712,7 @@ FONT_SIZES.forEach(sz=>{
   b.onpointerdown = (e)=> e.preventDefault();
   b.onclick = ()=>{
     textFontSize = sz;
+    localStorage.setItem(TEXT_FONT_SIZE_KEY, sz);
     document.querySelectorAll('#text-size-select .text-size-btn').forEach(x=>x.classList.remove('active'));
     b.classList.add('active');
     if(activeTextEdit){
@@ -1726,6 +1733,7 @@ FONTS.forEach(f=>{
   b.onpointerdown = (e)=> e.preventDefault();
   b.onclick = ()=>{
     textFontFamily = f.key;
+    localStorage.setItem(TEXT_FONT_FAMILY_KEY, f.key);
     document.querySelectorAll('#text-font-select .text-font-btn').forEach(x=>x.classList.remove('active'));
     b.classList.add('active');
     if(activeTextEdit){
