@@ -521,6 +521,16 @@
   .page-svg{z-index:1;}
   /* Textes au-dessus du SVG */
   .text-el{z-index:2;}
+  /* Aperçu du trait EN COURS de tracé (voir bindCanvasEvents/startStroke) : un <canvas> plutôt
+     qu'un <path> SVG mis à jour à chaque mouvement -- peindre un nouveau petit segment sur un
+     canvas ne coûte quasiment rien (le navigateur n'a JAMAIS besoin de repeindre ce qui a déjà été
+     tracé), alors que réécrire l'attribut 'd' d'un <path> SVG encore et encore pouvait rester
+     coûteux sur une page déjà chargée (beaucoup de traits/photos), même une fois le calcul du 'd'
+     lui-même rendu incrémental (voir smoothPathD plus haut) -- c'était la cause du temps de
+     réaction persistant au stylet, remonté plusieurs fois. Le trait DÉFINITIF, lui, reste un vrai
+     <path> SVG comme avant (voir endStroke) : ce canvas ne sert qu'à l'aperçu transitoire.
+     pointer-events:none pour ne jamais gêner le stylet/la souris/le doigt en dessous. */
+  .live-ink-canvas{position:absolute;top:0;left:0;pointer-events:none;z-index:6;}
 
   /* ---------- EN-TÊTE PREMIÈRE FEUILLE ---------- */
   .sheet-page-header{
@@ -710,7 +720,7 @@
 // À incrémenter à CHAQUE nouvelle version livrée (voir #app-version-label dans la sidebar et le
 // message affiché après un clic sur 🔄) -- sert de repère vérifiable pour confirmer qu'une mise à
 // jour a bien apporté une version plus récente, pas juste re-téléchargé ce qui était déjà en ligne.
-const APP_BUILD = 'v78';
+const APP_BUILD = 'v80';
 const PAGE_W = 794, PAGE_H = 1123; // A4 @ 96dpi, portrait
 const COLORS = ['#000000','#dc2626','#16a34a','#2563eb','#e8491d','#9333ea','#f5a623','#0891b2'];
 const HIGHLIGHT_COLORS = ['#fff176','#a5d6a7','#f48fb1','#90caf9','#ffb74d'];
@@ -2153,6 +2163,15 @@ function buildSheetCanvas(section, page, sheet, w, h){
     canvas.appendChild(textElDom(el, sheet));
   });
 
+  // Calque d'aperçu du trait en cours de tracé (voir .live-ink-canvas plus haut et
+  // bindCanvasEvents/startStroke plus bas) -- ajouté en dernier pour rester visuellement au-dessus
+  // de tout le reste pendant qu'on écrit/dessine.
+  const liveInkCanvas = document.createElement('canvas');
+  liveInkCanvas.className = 'live-ink-canvas';
+  liveInkCanvas.width = w; liveInkCanvas.height = h;
+  liveInkCanvas.style.width = w+'px'; liveInkCanvas.style.height = h+'px';
+  canvas.appendChild(liveInkCanvas);
+
   bindCanvasEvents(canvas, svg, sheet, section.id, page.id);
   return canvas;
 }
@@ -3333,6 +3352,12 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
   let erasing = false;
   let zoning = null;
   let shaping = null;
+  // Calque d'aperçu canvas pour le trait en cours (voir .live-ink-canvas / buildSheetCanvas) --
+  // peut être absent si cette fonction est un jour appelée sur un canvas plus ancien sans ce
+  // calque (repli silencieux, aucune casse, juste pas d'aperçu accéléré dans ce cas).
+  const liveInkCanvas = canvas.querySelector('.live-ink-canvas');
+  const liveInkCtx = liveInkCanvas ? liveInkCanvas.getContext('2d') : null;
+  function clearLiveInk(){ if(liveInkCtx) liveInkCtx.clearRect(0, 0, liveInkCanvas.width, liveInkCanvas.height); }
 
   // Un doigt sert à faire défiler la feuille (même en Stylo/Texte, où le geste est normalement
   // réservé au stylet) ; le stylet, lui, continue de dessiner/écrire normalement.
@@ -3699,7 +3724,7 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
   }
 
   document.addEventListener('pinch-start', ()=>{
-    if(drawing && canvas._livePath){ canvas._livePath.remove(); drawing = null; }
+    if(drawing){ clearLiveInk(); drawing = null; }
     erasing = false;
     // Le 1er doigt avait peut-être déjà démarré un défilement "à un seul doigt" (voir plus bas,
     // startTouchPan et la branche tactile de l'outil Sélection) avant que le 2e doigt ne pose et
@@ -3743,7 +3768,7 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
     // point resté en mémoire au lieu de commencer au nouveau point de contact. On nettoie donc
     // tout reste avant de commencer quoi que ce soit de nouveau (même filet que pour 'pinch-start').
     if(drawing){
-      if(canvas._livePath) canvas._livePath.remove();
+      clearLiveInk();
       drawing = null;
     }
     if(shaping){
@@ -4043,6 +4068,43 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
       // ↖ Sélection juste pour ça — pratique en pleine prise de notes.
       if(e.button!==2 && tryStartZoneGroupMove(canvas, sheet, e)) return;
 
+      // Le stylet/la souris posé sur une image ou un bloc de bibliothèque NON verrouillé le
+      // déplace directement, sans devoir basculer sur l'outil ↖ Sélection -- demande explicite.
+      // Contrairement au doigt (voir startImageTouchEdit plus haut), pas besoin d'un appui long
+      // pour lever une ambiguïté avec le défilement : ni le stylet ni la souris ne font défiler
+      // la feuille dans cet outil, donc rien à distinguer.
+      if(shapeMode==='free' && e.button!==2){
+        const hitMovable = findMovableAt(sheet, x, y);
+        if(hitMovable && !hitMovable.locked){
+          const elDiv = canvas.querySelector(`.image-el[data-el-id="${hitMovable.id}"]`);
+          if(elDiv){
+            canvas.setPointerCapture(e.pointerId);
+            const startClientX = e.clientX, startClientY = e.clientY;
+            const ox = hitMovable.x, oy = hitMovable.y;
+            let moved = false;
+            function moveMovable(ev){
+              if(!moved && Math.hypot(ev.clientX-startClientX, ev.clientY-startClientY) > 8) moved = true;
+              if(moved){
+                hitMovable.x = ox + (ev.clientX-startClientX);
+                hitMovable.y = oy + (ev.clientY-startClientY);
+                elDiv.style.left = hitMovable.x+'px';
+                elDiv.style.top = hitMovable.y+'px';
+              }
+            }
+            function upMovable(){
+              canvas.removeEventListener('pointermove', moveMovable);
+              canvas.removeEventListener('pointerup', upMovable);
+              canvas.removeEventListener('pointercancel', upMovable);
+              if(moved) save();
+            }
+            canvas.addEventListener('pointermove', moveMovable);
+            canvas.addEventListener('pointerup', upMovable);
+            canvas.addEventListener('pointercancel', upMovable);
+            return;
+          }
+        }
+      }
+
       // Clic droit (bouton secondaire) maintenu : démarre une sélection de zone (rectangle ou
       // lasso selon le mode choisi), exactement comme en outil Texte ou ↖ Sélection — pratique
       // pour copier un passage sans devoir changer d'outil en pleine prise de notes. Un appui
@@ -4094,20 +4156,24 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
 
       function startStroke(px, py){
         if(shapeMode==='free'){
-          // builtD/builtIndex : construction INCREMENTALE de l'aperçu en cours de tracé (voir la
-          // mise à jour dans pointermove ci-dessous) -- sans ça, smoothPathD() recalculait tout
-          // le trait depuis le tout premier point à CHAQUE mouvement, un travail qui grandit avec
-          // la longueur du trait déjà tracé (coût quadratique total sur un trait long, ex. un mot
-          // entier écrit sans lever le stylet) : c'est la cause principale du décalage stylet
-          // ressenti pendant l'écriture, amplifié par-dessus une photo (qui ajoute son propre
-          // coût de repeint). N'affecte que l'APERÇU pendant le tracé -- le trait définitif
-          // enregistré dans endStroke recalcule toujours via smoothPathD() (appelé une seule
-          // fois par trait, donc sans coût), strictement identique à avant.
-          drawing = { id: uid(), type:'stroke', color: strokeColor, width: strokeWidth, highlight: highlightMode, points:[[px,py]], pointerType: e.pointerType, downAt: Date.now(), pointerId: e.pointerId, builtD: `M ${px} ${py}`, builtIndex: 1 };
-          const path = strokePathEl({...drawing, d:`M ${px} ${py}`});
-          path._live = drawing;
-          svg.appendChild(path);
-          canvas._livePath = path;
+          // L'aperçu EN COURS de tracé est maintenant peint directement sur liveInkCanvas (voir
+          // pointermove plus bas et le commentaire sur .live-ink-canvas) -- bien plus léger qu'un
+          // <path> SVG dont on réécrit l'attribut 'd' à chaque mouvement, même de façon
+          // incrémentale : peindre un nouveau segment sur un canvas ne force jamais le navigateur à
+          // repeindre ce qui était déjà tracé, contrairement à un <path> SVG. builtIndex/lastX/lastY
+          // servent à savoir, à chaque nouveau point, où reprendre le pinceau et quel segment de
+          // courbe (voir smoothPathD, même calcul) vient d'être définitivement fixé. Le trait
+          // définitif enregistré dans endStroke recalcule toujours via smoothPathD() (appelé une
+          // seule fois par trait, donc sans coût), strictement identique à avant.
+          drawing = { id: uid(), type:'stroke', color: strokeColor, width: strokeWidth, highlight: highlightMode, points:[[px,py]], pointerType: e.pointerType, downAt: Date.now(), pointerId: e.pointerId, builtIndex: 1, lastX: px, lastY: py };
+          if(liveInkCtx){
+            clearLiveInk();
+            liveInkCtx.globalAlpha = highlightMode ? 0.4 : 1;
+            liveInkCtx.strokeStyle = strokeColor;
+            liveInkCtx.lineWidth = strokeWidth;
+            liveInkCtx.lineCap = highlightMode ? 'square' : 'round';
+            liveInkCtx.lineJoin = 'round';
+          }
         } else {
           shaping = { startX:px, startY:py, mode:shapeMode, color:strokeColor, width:strokeWidth, highlight:highlightMode };
           const path = strokePathEl({ color:strokeColor, width:strokeWidth, highlight:highlightMode, d:`M ${px} ${py}` });
@@ -4236,21 +4302,29 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
       const y = (ev.clientY - rect.top)/scale;
       drawing.points.push([x,y]);
     });
-    // Aperçu lissé pendant le tracé (voir smoothPathD) : évite un "saut" visuel entre ce qu'on
-    // voit en écrivant et ce qui est réellement enregistré une fois le stylet levé (endStroke).
-    // Construction INCREMENTALE (voir commentaire dans startStroke) : on ne recalcule QUE le/les
-    // nouveau(x) segment(s) Q apparus depuis le dernier mouvement, jamais tout le trait depuis le
-    // début -- reproduit exactement le même 'd' que smoothPathD(drawing.points) aurait produit,
-    // juste sans repayer à chaque fois le travail déjà fait sur la partie déjà tracée.
-    while (drawing.builtIndex < drawing.points.length - 1) {
-      const bi = drawing.builtIndex;
-      const bp = drawing.points[bi], bpNext = drawing.points[bi+1];
-      const bmx = (bp[0]+bpNext[0])/2, bmy = (bp[1]+bpNext[1])/2;
-      drawing.builtD += ` Q ${bp[0]} ${bp[1]} ${bmx} ${bmy}`;
-      drawing.builtIndex++;
+    // Aperçu peint directement sur liveInkCanvas (voir commentaire dans startStroke), un segment de
+    // courbe à la fois, dès qu'il est définitivement fixé (même calcul que smoothPathD : le point
+    // bp sert de point de contrôle vers le MILIEU de bp/bpNext -- on ne connaît ce milieu, donc on
+    // ne peut "fermer" ce segment, qu'une fois le point suivant reçu). Chaque segment est peint puis
+    // le tracé du contexte est réinitialisé (beginPath) : le navigateur ne repeint donc JAMAIS toute
+    // la partie déjà tracée, juste le petit bout nouveau -- contrairement à un <path> SVG dont on
+    // réécrirait le 'd' en entier à chaque fois, même construit de façon incrémentale côté chaîne de
+    // caractères. Le tout dernier point (celui d'après le dernier segment fixé) n'a pas encore de
+    // "suivant" : il n'est donc pas encore peint ici, il le sera via le vrai <path> SVG définitif
+    // créé dans endStroke (décalage d'un point, imperceptible vu la fréquence des événements).
+    if(liveInkCtx){
+      while (drawing.builtIndex < drawing.points.length - 1) {
+        const bi = drawing.builtIndex;
+        const bp = drawing.points[bi], bpNext = drawing.points[bi+1];
+        const bmx = (bp[0]+bpNext[0])/2, bmy = (bp[1]+bpNext[1])/2;
+        liveInkCtx.beginPath();
+        liveInkCtx.moveTo(drawing.lastX, drawing.lastY);
+        liveInkCtx.quadraticCurveTo(bp[0], bp[1], bmx, bmy);
+        liveInkCtx.stroke();
+        drawing.lastX = bmx; drawing.lastY = bmy;
+        drawing.builtIndex++;
+      }
     }
-    const liveLast = drawing.points[drawing.points.length-1];
-    canvas._livePath.setAttribute('d', drawing.builtD + ` L ${liveLast[0]} ${liveLast[1]}`);
   });
 
   function endStroke(e){
@@ -4297,10 +4371,11 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
       // ne sont pas retouchés rétroactivement par ce changement.
       const d = smoothPathD(drawing.points);
       const el = { id: drawing.id, type:'stroke', color: drawing.color, width: drawing.width, highlight: drawing.highlight, d };
+      clearLiveInk(); // l'aperçu canvas cède la place au vrai <path> SVG définitif ci-dessous
       if(drawing.points.length>1){
         sheet.elements.push(el); save();
+        svg.appendChild(strokePathEl(el));
       } else {
-        canvas._livePath.remove();
         // Un simple contact du stylet sans tracé (donc déjà sans aucun effet visible, comme avant)
         // : si le contact a assez duré pour être un VRAI appui long (pas un frôlement fugace), on
         // propose de coller ici. Ça évite d'avoir à basculer sur ↖ Sélection juste pour coller une
@@ -4550,10 +4625,11 @@ function insertImageBlob(blob, sheet, atX, atY, layer){
         // Mo, et son encodage en base64 (~+33% de poids) peut vite remplir le stockage local du
         // navigateur, ralentir chaque "Envoyer"/"Récupérer" (voir syncTimeoutForSize), et occuper
         // inutilement de la place sur le serveur de synchro au fil du temps.
-        // Réglage resserré (1280px / JPEG 0.72, au lieu de 1600px / 0.82) à la demande explicite de
-        // l'utilisateur pour gagner encore de la place, quitte à perdre un peu de netteté sur les
-        // photos — 1280px reste largement lisible pour des annotations manuscrites/documents.
-        const MAX_DIM = 1280;
+        // Réglage resserré à nouveau (800px / JPEG 0.5, au lieu de 1280px / 0.72) à la demande
+        // explicite de l'utilisateur pour gagner encore plus de place (les classeurs avec beaucoup
+        // de photos finissaient par dépasser la limite d'envoi du serveur de synchro), quitte à
+        // perdre nettement en netteté — du texte fin sur une photo peut devenir difficile à lire.
+        const MAX_DIM = 800;
         let finalSrc = src;
         if(probe.width > MAX_DIM || probe.height > MAX_DIM){
           try{
@@ -4563,7 +4639,7 @@ function insertImageBlob(blob, sheet, atX, atY, layer){
             off.width = cw; off.height = ch;
             const octx = off.getContext('2d');
             octx.drawImage(probe, 0, 0, cw, ch);
-            finalSrc = off.toDataURL('image/jpeg', 0.72);
+            finalSrc = off.toDataURL('image/jpeg', 0.5);
           }catch(err){
             console.warn('Compression image impossible, on garde le fichier original :', err);
             finalSrc = src;
@@ -4666,6 +4742,17 @@ function findImageAt(sheet, x, y){
   let found = null;
   sheet.elements.forEach(el=>{
     if(el.type==='image' && x>=el.x && x<=el.x+el.w && y>=el.y && y<=el.y+el.h) found = el;
+  });
+  return found;
+}
+// Comme findImageAt, mais reconnaît aussi les blocs de bibliothèque (type 'group', voir
+// insertElementsAsGroup/groupElDom) -- utilisé pour pouvoir les déplacer directement au
+// stylet/à la souris depuis l'outil Stylo (voir plus bas), pas seulement au doigt via
+// startImageTouchEdit.
+function findMovableAt(sheet, x, y){
+  let found = null;
+  sheet.elements.forEach(el=>{
+    if((el.type==='image' || el.type==='group') && x>=el.x && x<=el.x+el.w && y>=el.y && y<=el.y+el.h) found = el;
   });
   return found;
 }
@@ -6074,12 +6161,13 @@ document.getElementById('sync-push-btn').onclick = manualPushSync;
 document.getElementById('sync-pull-btn').onclick = manualPullSync;
 
 // Recompresse une image déjà enregistrée (base64) : ne fait rien si elle est déjà assez petite.
-// Réutilise la même limite (1280px / JPEG 0.72) que l'insertion d'une nouvelle photo — voir
+// Réutilise la même limite (800px / JPEG 0.5) que l'insertion d'une nouvelle photo — voir
 // insertImageBlob — pour rester cohérent avec ce qu'on obtiendrait en la collant à nouveau.
-// NOTE : ce réglage a été resserré (c'était 1600px/0.82) — sans ça, relancer "🗜 Compacter" sur des
-// photos déjà compactées à l'ancien réglage ne changeait plus rien du tout (la vérification ne
-// porte que sur les DIMENSIONS déjà décodées, impossible de savoir "à quelle qualité JPEG" une
-// image a été enregistrée) : il fallait baisser le seuil pour qu'un nouveau passage ait un effet.
+// NOTE : ce réglage a été resserré à nouveau (c'était 1280px/0.72, avant ça 1600px/0.82) — sans ça,
+// relancer "🗜 Compacter" sur des photos déjà compactées à l'ancien réglage ne changeait plus rien
+// du tout (la vérification ne porte que sur les DIMENSIONS déjà décodées, impossible de savoir "à
+// quelle qualité JPEG" une image a été enregistrée) : il fallait baisser le seuil pour qu'un
+// nouveau passage ait un effet.
 function compressDataUrl(src, maxDim, quality){
   return new Promise((resolve)=>{
     const img = new Image();
@@ -6119,7 +6207,7 @@ async function compactAllImages(){
   const beforeLen = JSON.stringify(data).length;
   let changed = 0;
   for(const el of targets){
-    const compressed = await compressDataUrl(el.src, 1280, 0.72);
+    const compressed = await compressDataUrl(el.src, 800, 0.5);
     if(compressed && compressed.length < el.src.length){ el.src = compressed; changed++; }
   }
   const afterLen = JSON.stringify(data).length;
