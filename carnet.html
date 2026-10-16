@@ -503,7 +503,8 @@
   /* Exception : une image sélectionnée par appui long au doigt en outil Stylo (voir
      startImageTouchEdit) redevient interactive, pour pouvoir la déplacer/agrandir/verrouiller
      sans avoir à basculer sur l'outil ↖ Sélection. */
-  .page-canvas.tool-pen .image-el.pen-touch-selected{pointer-events:auto;}
+  .page-canvas.tool-pen .image-el.pen-touch-selected,
+  .page-canvas.tool-text .image-el.pen-touch-selected{pointer-events:auto;}
   /* Image "ancrée" : ne réagit plus au clic/glisser (le doigt peut défiler par-dessus),
      seul le petit point reste cliquable pour la déverrouiller. */
   .image-el.locked{pointer-events:none;cursor:default;touch-action:pan-x pan-y;}
@@ -660,6 +661,7 @@
       <div class="tool-group">
         <button class="tool-btn labeled" id="orientation-toggle" title="Basculer entre portrait et paysage (pour cette page)" onclick="toggleOrientation()">📄 Portrait</button>
         <button class="tool-btn labeled" title="Ajouter une feuille A4 après celle-ci, dans la même page" onclick="addSheetAfterCurrent()">＋ Feuille</button>
+        <button class="tool-btn labeled" title="Ajouter une nouvelle page (avec son nom) juste après la page affichée" onclick="addPageFromToolbar()">＋ Page</button>
         <button class="tool-btn labeled" title="Colle une image copiée dans le presse-papier" onclick="pasteClipboard()">📋 Coller</button>
         <button class="tool-btn labeled" title="Insérer une image depuis un fichier" onclick="insertImageFromPicker()">🖼 Image</button>
         <input type="file" id="image-input" accept="image/*" style="display:none" onchange="insertImageFromInput(event)">
@@ -1507,6 +1509,21 @@ function addSheetAfterCurrent(){
   if(!p) return;
   const idx = p.sheets.findIndex(sh=>sh.id===activeSheetId);
   addSheetAt(activeSectionId, p.id, idx===-1 ? p.sheets.length : idx+1);
+}
+
+// Bouton "+ Page" de la barre d'outils : demande le nom, puis crée la page juste après la page
+// affichée, dans la même section (nouvel item dans la barre latérale).
+function addPageFromToolbar(){
+  const s = activeSection();
+  if(!s){ showInfoMessage("Crée d'abord une section dans la barre latérale."); return; }
+  const idx = s.pages.findIndex(pg=>pg.id===activePageId);
+  const insertIdx = idx===-1 ? s.pages.length : idx+1;
+  showPromptDialog('Nom de la nouvelle page :', '', (name)=>{
+    name = (name||'').trim();
+    insertPageAt(s.id, insertIdx);
+    const p = activePage();
+    if(p && name){ p.name = name; save(); renderSidebar(); renderCanvasStack(); }
+  });
 }
 
 // Supprime la dernière feuille insérée (ou une feuille donnée) sans toucher à la page elle-même.
@@ -3428,7 +3445,7 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
   // sur canvas._touchPanUp : un pincement à 2 doigts qui démarre (voir 'pinch-start' plus haut)
   // force l'arrêt de ce geste SANS jamais déclencher l'écriture, même si le doigt n'avait pas
   // encore bougé au moment du pincement.
-  function startTouchTypeOrPan(e, x, y){
+  function startTouchTypeOrPan(e, x, y, deferMs){
     e.preventDefault();
     try{ canvas.setPointerCapture(e.pointerId); }catch(err){}
     const startX = e.clientX, startY = e.clientY;
@@ -3452,6 +3469,17 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
     function up(ev){
       cleanupTypeOrPan();
       if(moved) return; // défilement : rien d'autre à faire
+      // Tap sur une image : on attend un peu, au cas où ce serait le 1er tap d'un double-tap
+      // (qui sélectionne l'image pour la déplacer, voir selectImageForTouch).
+      if(deferMs){
+        const evc = { clientX: ev.clientX, clientY: ev.clientY };
+        if(pendingTouchTypeTimer) clearTimeout(pendingTouchTypeTimer);
+        pendingTouchTypeTimer = setTimeout(()=>{ pendingTouchTypeTimer = null; typeAt(evc); }, deferMs);
+        return;
+      }
+      typeAt(ev);
+    }
+    function typeAt(ev){
       const hitText = findTextAt(canvas, sheet, x, y);
       if(hitText){
         const dom = canvas.querySelector(`.text-el[data-el-id="${hitText.id}"]`);
@@ -3498,6 +3526,79 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
   // la sélection, voir imageElDom) SANS avoir à changer d'outil. Un mouvement avant la fin du
   // délai bascule sur le défilement normal, exactement comme si le doigt n'avait touché aucune
   // image — pour ne jamais gêner la lecture/le défilement habituel au doigt.
+  // --- Image au doigt en outil Stylo/Texte : DOUBLE-TAP pour la sélectionner, puis glisser ---
+  // (remplace l'ancien appui long, qui déplaçait l'image par erreur en voulant juste défiler)
+  function imageIsTouchSelected(id){
+    const d = canvas.querySelector(`.image-el[data-el-id="${id}"]`);
+    return !!(d && d.classList.contains('pen-touch-selected'));
+  }
+  function selectImageForTouch(img){
+    if(pendingTouchTypeTimer){ clearTimeout(pendingTouchTypeTimer); pendingTouchTypeTimer = null; }
+    lastImageTouchTap = null;
+    selectEl(img.id);
+    const d = canvas.querySelector(`.image-el[data-el-id="${img.id}"]`);
+    if(d) d.classList.add('pen-touch-selected');
+  }
+  function consumeImageDoubleTap(img, e){
+    const l = lastImageTouchTap;
+    if(l && l.id===img.id && Date.now()-l.t < 400 && Math.hypot(e.clientX-l.x, e.clientY-l.y) < 40){
+      lastImageTouchTap = null;
+      return true;
+    }
+    return false;
+  }
+  // Mémorise un tap COURT et SANS mouvement sur l'image (le 1er d'un éventuel double-tap).
+  function trackImageTap(img, e){
+    const t0 = Date.now(), sx = e.clientX, sy = e.clientY;
+    let moved = false;
+    function mv(ev){ if(ev.pointerId!==e.pointerId) return; if(Math.hypot(ev.clientX-sx, ev.clientY-sy) > 12) moved = true; }
+    function done(ev, ok){
+      if(ev.pointerId!==e.pointerId) return;
+      canvas.removeEventListener('pointermove', mv);
+      canvas.removeEventListener('pointerup', upT);
+      canvas.removeEventListener('pointercancel', cancelT);
+      lastImageTouchTap = (ok && !moved && !pinching && Date.now()-t0 < 350) ? { id: img.id, t: Date.now(), x: ev.clientX, y: ev.clientY } : null;
+    }
+    function upT(ev){ done(ev, true); }
+    function cancelT(ev){ done(ev, false); }
+    canvas.addEventListener('pointermove', mv);
+    canvas.addEventListener('pointerup', upT);
+    canvas.addEventListener('pointercancel', cancelT);
+  }
+  // Image déjà sélectionnée par double-tap : un doigt posé dessus la déplace directement.
+  function startTouchSelectedImageDrag(img, e){
+    e.preventDefault();
+    try{ canvas.setPointerCapture(e.pointerId); }catch(err){}
+    const sx = e.clientX, sy = e.clientY, ox = img.x, oy = img.y;
+    let moved = false, lastX = sx, lastY = sy;
+    const d = canvas.querySelector(`.image-el[data-el-id="${img.id}"]`);
+    function move(ev){
+      if(ev.pointerId!==e.pointerId || pinching) return;
+      if(!moved && Math.hypot(ev.clientX-sx, ev.clientY-sy) > 4) moved = true;
+      if(!moved) return;
+      img.x = ox + (ev.clientX-sx);
+      img.y = oy + (ev.clientY-sy);
+      if(d){ d.style.left = img.x+'px'; d.style.top = img.y+'px'; }
+      lastX = ev.clientX; lastY = ev.clientY;
+      updateAutoScroll(ev.clientY);
+    }
+    function up(ev){
+      if(ev && ev.pointerId!==e.pointerId) return;
+      canvas.removeEventListener('pointermove', move);
+      canvas.removeEventListener('pointerup', up);
+      canvas.removeEventListener('pointercancel', up);
+      stopAutoScroll();
+      if(moved){
+        const retargeted = retargetElementToSheetUnderPoint(img, sheet, lastX, lastY, d);
+        save();
+        if(retargeted) renderCanvasStack();
+      }
+    }
+    canvas.addEventListener('pointermove', move);
+    canvas.addEventListener('pointerup', up);
+    canvas.addEventListener('pointercancel', up);
+  }
+
   function startImageTouchEdit(hitImage, e){
     try{ canvas.setPointerCapture(e.pointerId); }catch(err){}
     const startX = e.clientX, startY = e.clientY;
@@ -3910,7 +4011,16 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
     if(tool==='text'){
       // Un doigt écrit maintenant comme le stylet (tap simple), un glisser continue de faire
       // défiler -- voir startTouchTypeOrPan (demande explicite : écrire sans stylet, sur tablette).
-      if(e.pointerType==='touch'){ startTouchTypeOrPan(e, x, y); return; }
+      if(e.pointerType==='touch'){
+        // Même double-tap que l'outil Stylo pour sélectionner puis déplacer une image.
+        const tImg = findImageAt(sheet, x, y);
+        const tMovable = (tImg && !tImg.locked) ? tImg : null;
+        if(tMovable && selectedElId===tMovable.id && imageIsTouchSelected(tMovable.id)){ startTouchSelectedImageDrag(tMovable, e); return; }
+        if(document.querySelector('.image-el.pen-touch-selected')) deselectEl();
+        if(tMovable && consumeImageDoubleTap(tMovable, e)){ e.preventDefault(); selectImageForTouch(tMovable); return; }
+        if(tMovable) trackImageTap(tMovable, e);
+        startTouchTypeOrPan(e, x, y, tMovable ? 320 : 0); return;
+      }
       e.preventDefault();
 
       // Une sélection de zone est déjà affichée (voir plus haut, appui long/clic droit) et le
@@ -4045,7 +4155,14 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
       // tapé à côté, au point de pouvoir être touchées par erreur au tap suivant (ex. la
       // verrouillant accidentellement, rendant alors l'appui long suivant inopérant puisqu'une
       // image verrouillée est délibérément ignorée par ce mécanisme, voir plus bas).
+      // Double-tap au doigt sur une image non verrouillée : elle est sélectionnée ; un doigt posé
+      // ensuite dessus la déplace (voir startTouchSelectedImageDrag). L'appui long ne la déplace plus.
+      const touchImg = (e.pointerType==='touch' && shapeMode==='free') ? findImageAt(sheet, x, y) : null;
+      const touchMovable = (touchImg && !touchImg.locked) ? touchImg : null;
+      if(touchMovable && selectedElId===touchMovable.id && imageIsTouchSelected(touchMovable.id)){ startTouchSelectedImageDrag(touchMovable, e); return; }
       if(selectedElId) deselectEl();
+      if(touchMovable && consumeImageDoubleTap(touchMovable, e)){ e.preventDefault(); selectImageForTouch(touchMovable); return; }
+      if(touchMovable) trackImageTap(touchMovable, e);
       // Un doigt fait défiler (comme avant), mais un appui long SANS bouger propose maintenant
       // de coller ici, exactement comme en outil ↖ Sélection (voir startTouchPanOrPaste) — pour
       // pouvoir coller une capture d'écran sans devoir changer d'outil en pleine prise de notes.
@@ -4054,8 +4171,6 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
       // startImageTouchEdit) — un mouvement avant la fin du délai bascule normalement sur le
       // défilement, exactement comme si le doigt n'avait touché aucune image.
       if(e.pointerType==='touch'){
-        const hitImageTouch = shapeMode==='free' ? findImageAt(sheet, x, y) : null;
-        if(hitImageTouch && !hitImageTouch.locked){ startImageTouchEdit(hitImageTouch, e); return; }
         startTouchPanOrPaste(e, x, y); return;
       }
       // Le survol du stylet (à quelques mm de l'écran, sans contact réel) déclenche parfois
@@ -4738,6 +4853,10 @@ function pointHitsExistingElement(sheet, x, y){
 // Comme pointHitsExistingElement, mais renvoie l'IMAGE elle-même (la dernière qui correspond,
 // donc la plus proche du dessus) au lieu d'un simple booléen — utilisé pour permettre de déplacer
 // une image au stylet par un appui long, même en outil ✎ Stylo (voir bindCanvasEvents).
+// Double-tap au doigt sur une image (outils Stylo/Texte) : dernier tap court relevé sur une image,
+// et création de texte différée en outil Texte (annulée si ce tap devient un double-tap).
+var lastImageTouchTap = null;
+var pendingTouchTypeTimer = null;
 function findImageAt(sheet, x, y){
   let found = null;
   sheet.elements.forEach(el=>{
