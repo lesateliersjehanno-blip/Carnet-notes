@@ -973,7 +973,65 @@ function trySetStorage(raw, opts){
   });
 }
 
+/* ---- Sauvegarde différée des traits au stylet (réactivité de l'écriture) ----
+   Avant : CHAQUE trait relancait JSON.stringify(data) sur TOUT le carnet (plusieurs dizaines de Mo
+   avec les photos) + gardait une copie complète dans l'historique -> l'écran se figeait un
+   instant à chaque levée du stylet, et le trait suivant démarrait en retard.
+   Maintenant : un trait ajouté est noté dans l'historique sous forme légère (juste "ce trait sur
+   cette feuille"), et l'écriture sur le disque est regroupée et faite dès que le stylet fait une
+   pause (INK_FLUSH_MS sans écrire). Annuler/Rétablir reste trait par trait. */
+const INK_FLUSH_MS = 1200;
+let inkDirty = false, inkFlushTimer = null, lastInkMoveAt = 0;
+function markInkMove(){ lastInkMoveAt = performance.now(); }
+function flushInkNow(){
+  if(inkFlushTimer){ clearTimeout(inkFlushTimer); inkFlushTimer = null; }
+  if(!inkDirty) return;
+  inkDirty = false;
+  lastSavedRaw = JSON.stringify(data);
+  trySetStorage(lastSavedRaw);
+  undoStack.forEach(o=>{ if(o && typeof o==='object') o.pending = false; });
+}
+function scheduleInkFlush(){
+  if(inkFlushTimer) clearTimeout(inkFlushTimer);
+  inkFlushTimer = setTimeout(function tick(){
+    const idle = performance.now() - lastInkMoveAt;
+    if(idle < INK_FLUSH_MS){ inkFlushTimer = setTimeout(tick, INK_FLUSH_MS - idle + 50); return; }
+    inkFlushTimer = null;
+    flushInkNow();
+  }, INK_FLUSH_MS);
+}
+function findSheetById(id){
+  for(const c of data.classeurs) for(const s of c.sections) for(const p of s.pages){
+    const sh = p.sheets.find(x=>x.id===id); if(sh) return sh;
+  }
+  return null;
+}
+// À appeler à la place de save() quand on vient juste d'AJOUTER un trait (déjà poussé dans sheet.elements).
+function saveStroke(sheetId, el){
+  if(!suspendHistory){
+    undoStack.push({ kind:'stroke', sheetId, el: JSON.parse(JSON.stringify(el)), pending:true });
+    if(undoStack.length > UNDO_LIMIT) undoStack.shift();
+    redoStack = [];
+  }
+  inkDirty = true;
+  scheduleInkFlush();
+  updateUndoRedoButtons();
+}
+// Sécurité : on écrit tout de suite si l'appli passe en arrière-plan ou se ferme.
+document.addEventListener('visibilitychange', ()=>{ if(document.visibilityState==='hidden') flushInkNow(); });
+window.addEventListener('pagehide', flushInkNow);
+
 function save(){
+  if(inkDirty){
+    // Des traits récents ne sont pas encore écrits : lastSavedRaw = état AVANT ces traits.
+    // On les regroupe donc avec cette action-ci dans une seule étape d'annulation (cas rare :
+    // une autre action faite dans la seconde qui suit un trait).
+    if(!suspendHistory){
+      while(undoStack.length && typeof undoStack[undoStack.length-1]==='object' && undoStack[undoStack.length-1].pending) undoStack.pop();
+    }
+    inkDirty = false;
+    if(inkFlushTimer){ clearTimeout(inkFlushTimer); inkFlushTimer = null; }
+  }
   if(!suspendHistory){
     // Utilise directement lastSavedRaw (suivi en mémoire) plutôt qu'une relecture de localStorage :
     // plus simple, et plus fiable maintenant qu'il n'y a plus qu'un seul stockage (IndexedDB,
@@ -1009,6 +1067,20 @@ function clampActiveRefs(){
 
 function undo(){
   if(undoStack.length===0) return;
+  flushInkNow();
+  const top = undoStack[undoStack.length-1];
+  if(typeof top==='object'){
+    undoStack.pop();
+    const sh = findSheetById(top.sheetId);
+    if(sh) sh.elements = sh.elements.filter(x=>x.id!==top.el.id);
+    redoStack.push(top);
+    lastSavedRaw = JSON.stringify(data); trySetStorage(lastSavedRaw);
+    selectedElId = null;
+    const path = document.querySelector(`path[data-el-id="${top.el.id}"]`);
+    if(path) path.remove(); else { clampActiveRefs(); renderSidebar(); renderCanvasStack(); }
+    updateUndoRedoButtons();
+    return;
+  }
   const current = lastSavedRaw;
   const prevState = undoStack.pop();
   redoStack.push(current);
@@ -1025,6 +1097,22 @@ function undo(){
 
 function redo(){
   if(redoStack.length===0) return;
+  flushInkNow();
+  const top = redoStack[redoStack.length-1];
+  if(typeof top==='object'){
+    redoStack.pop();
+    const sh = findSheetById(top.sheetId);
+    if(sh){
+      const el = JSON.parse(JSON.stringify(top.el));
+      sh.elements.push(el);
+      const svg = document.querySelector(`.page-canvas[data-sheet-id="${top.sheetId}"] .page-svg`);
+      if(svg) svg.appendChild(strokePathEl(el)); else renderCanvasStack();
+    }
+    undoStack.push({ ...top, pending:false });
+    lastSavedRaw = JSON.stringify(data); trySetStorage(lastSavedRaw);
+    updateUndoRedoButtons();
+    return;
+  }
   const current = lastSavedRaw;
   const nextState = redoStack.pop();
   undoStack.push(current);
@@ -1399,15 +1487,15 @@ document.getElementById('brand').addEventListener('click', ()=> handlePotentialD
 function addSection(){
   const classeur = activeClasseur();
   if(!classeur) return;
-  // Double confirmation avant creation -- demande explicite de l'utilisateur, suite a des clics
-  // accidentels sur ce bouton (voir aussi l'espacement CSS de #add-section-icon-btn plus haut).
-  showConfirmMessage(`Ajouter un nouveau chantier dans "${classeur.name}" ?`, ()=>{
-    showConfirmMessage(`Confirmer la création de ce nouveau chantier ?`, ()=>{
-      const s = { id: uid(), name: 'Nouvelle section', orientation: 'portrait', pages: [{ id: uid(), name: 'Page 1', orientation: 'portrait', createdAt: dateJour(), sheets: [{ id: uid(), elements: [] }] }] };
-      classeur.sections.push(s);
-      activeSectionId = s.id; activePageId = s.pages[0].id; activeSheetId = s.pages[0].sheets[0].id;
-      save(); renderSidebar(); renderCanvasStack();
-    });
+  // Fenêtre de saisie du nom du chantier (comme "+ Page"). Elle sert aussi de garde-fou contre
+  // les clics accidentels sur ce bouton : rien n'est créé si on annule ou si le nom est vide.
+  showPromptDialog(`Nom du nouveau chantier (dans "${classeur.name}") :`, '', (name)=>{
+    name = (name||'').trim();
+    if(!name){ showInfoMessage("Aucun nom saisi : le chantier n'a pas été créé."); return; }
+    const s = { id: uid(), name, orientation: 'portrait', pages: [{ id: uid(), name: 'Page 1', orientation: 'portrait', createdAt: dateJour(), sheets: [{ id: uid(), elements: [] }] }] };
+    classeur.sections.push(s);
+    activeSectionId = s.id; activePageId = s.pages[0].id; activeSheetId = s.pages[0].sheets[0].id;
+    save(); renderSidebar(); renderCanvasStack();
   });
 }
 
@@ -3373,7 +3461,7 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
   // peut être absent si cette fonction est un jour appelée sur un canvas plus ancien sans ce
   // calque (repli silencieux, aucune casse, juste pas d'aperçu accéléré dans ce cas).
   const liveInkCanvas = canvas.querySelector('.live-ink-canvas');
-  const liveInkCtx = liveInkCanvas ? liveInkCanvas.getContext('2d') : null;
+  const liveInkCtx = liveInkCanvas ? liveInkCanvas.getContext('2d', { desynchronized: true }) : null;
   function clearLiveInk(){ if(liveInkCtx) liveInkCtx.clearRect(0, 0, liveInkCanvas.width, liveInkCanvas.height); }
 
   // Un doigt sert à faire défiler la feuille (même en Stylo/Texte, où le geste est normalement
@@ -4405,6 +4493,7 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
     // n'accepte donc ici que les mouvements du pointeur qui a réellement commencé ce trait.
     if(e.pointerId !== drawing.pointerId) return;
     e.preventDefault();
+    markInkMove();
     const rect = canvas.getBoundingClientRect();
     const scale = rect.width / canvas.offsetWidth || 1;
     // getCoalescedEvents() recovers every intermediate point the stylus reported between
@@ -4488,7 +4577,7 @@ function bindCanvasEvents(canvas, svg, sheet, sectionId, pageId){
       const el = { id: drawing.id, type:'stroke', color: drawing.color, width: drawing.width, highlight: drawing.highlight, d };
       clearLiveInk(); // l'aperçu canvas cède la place au vrai <path> SVG définitif ci-dessous
       if(drawing.points.length>1){
-        sheet.elements.push(el); save();
+        sheet.elements.push(el); saveStroke(sheet.id, el);
         svg.appendChild(strokePathEl(el));
       } else {
         // Un simple contact du stylet sans tracé (donc déjà sans aucun effet visible, comme avant)
@@ -6112,6 +6201,7 @@ async function pushClasseurToCloud(c, ts){
 // navigateurs en mode application (PWA à l'écran d'accueil), ce qui donnait l'impression que
 // rien ne se passait, aussi bien en cas de succès que d'erreur.
 function manualPushSync(){
+  flushInkNow();
   if(!syncServerUrl || !syncToken){ showInfoMessage("Configure d'abord l'adresse de ton serveur et le code secret (icône 🔗) avant d'envoyer."); return; }
   showConfirmMessage("Envoyer ce carnet vers ton serveur ? Chaque classeur non archivé va REMPLACER sa version en ligne actuelle (celle des autres appareils). Les classeurs archivés ne sont pas envoyés (leur copie en ligne, si elle existe, sera supprimée pour libérer de la place).", async ()=>{
     const pushBtn = document.getElementById('sync-push-btn');
@@ -6184,6 +6274,7 @@ function manualPushSync(){
 // avant, voir backupBeforePull, qui permet de tout récupérer manuellement si besoin).
 // Voir manualPushSync ci-dessus pour la raison du passage à showConfirmMessage/showInfoMessage.
 function manualPullSync(){
+  flushInkNow();
   if(!syncServerUrl || !syncToken){ showInfoMessage("Configure d'abord l'adresse de ton serveur et le code secret (icône 🔗) avant de récupérer."); return; }
   showConfirmMessage("Récupérer la version en ligne ? Elle va REMPLACER ENTIÈREMENT ton carnet actuel (tout ce qui n'a pas encore été envoyé sera perdu ici, mais une copie de sauvegarde de ton carnet actuel sera d'abord enregistrée sur ton disque, par précaution).", async ()=>{
     // Désactivé pour toute la durée de l'opération, ré-activé sur CHAQUE chemin de sortie
